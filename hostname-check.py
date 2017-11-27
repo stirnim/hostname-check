@@ -8,6 +8,9 @@ NS, whether there is mismatch between parent and child zone.
 Specifically, this scripts supports rdata hostname checks of the
 QTYPEs NS, CNAME, MX, SRV and DNAME.
 
+The script sends DNS queries to your local resolver but also
+to authoritative name servers directly.
+
 Author: Daniel Stirnimann <daniel.stirnimann@switch.ch>
 '''
 

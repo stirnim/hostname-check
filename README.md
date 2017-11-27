@@ -27,4 +27,6 @@ OPTIONS:
 -h            print this help
 ```
 
-Note: tsig key file expects a BIND key file ([See also BIND ARM](https://ftp.isc.org/isc/bind9/cur/9.11/doc/arm/Bv9ARM.ch04.html#tsig))
+Notes:
+ * tsig key file expects a BIND key file ([See also BIND ARM](https://ftp.isc.org/isc/bind9/cur/9.11/doc/arm/Bv9ARM.ch04.html#tsig))
+ * The script sends DNS queries to your local resolver but also to authoritative name servers directly
