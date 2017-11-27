@@ -295,7 +295,7 @@ def resolve_name(resolver, qname, qtype):
     logger.debug("resolve " + qname + " " + qtype)
     # No answer is no error case. It can mean we tried with the wrong qtype
     answers = resolver.query(qname, qtype, raise_on_no_answer=False)
-    if answers.rdtype == dns.rdatatype.NS:
+    if answers.rdtype == dns.rdatatype.NS and answers.rrset != None:
         for rrset in answers:
             result.append( rrset.target.to_text().lower() )
     return result
