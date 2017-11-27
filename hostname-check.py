@@ -25,6 +25,7 @@ import dns.tsigkeyring
 import dns.exception
 import dns.resolver
 import dns.message
+import traceback
 
 
 def usage():
@@ -459,6 +460,9 @@ if __name__ == "__main__":
         check_zone(zoneparsed, zoneorigin, timeout)
 
     except Exception, e:
-        print("Error: " + str(e) + ", aborted!")
-        sys.exit(1)
+        if verbose:
+            traceback.print_exc()
+        else:
+            print("Error: " + str(e) + ", aborted!")
+            sys.exit(1)
 
