@@ -38,6 +38,7 @@ def usage():
     print '-k keyfile    specify tsig key file for zone transfer access'
     print '-x policy     comma seperated list of qtype to check. default if not'
     print '              specified: NS,MX,CNAME,SRV,DNAME'
+    print '-t timeout    DNS query timeout (default 3 sec)'
     print '-v            verbose output (debugging)'
     print '-h            print this help'
     sys.exit()
@@ -199,7 +200,7 @@ def parse_zone(z, check_policy):
     return zoneparsed
 
 
-def check_zone(zoneparsed, zoneorigin):
+def check_zone(zoneparsed, zoneorigin, timeout):
     """ Checks all records in the dictionary given in the argument.
         Prints resolve errors to stdout. """
     # set up resolver
@@ -210,6 +211,7 @@ def check_zone(zoneparsed, zoneorigin):
     else:
         myresolver = dns.resolver.Resolver(configure=False)
         myresolver.nameservers = [resolver]
+    myresolver.timeout = timeout
     # zoneorigin needed to identify NS apex set and find
     # parent zone
     if not zoneorigin.endswith("."):
@@ -222,7 +224,7 @@ def check_zone(zoneparsed, zoneorigin):
             # Zone apex NS rrset needs different checks. We cannot ask resolver
             # for NS rrset as this would return zone apex NS rrset again.
             if owner == zoneorigin:
-                ns_parent = get_parent_ns_set(myresolver, zoneorigin)
+                ns_parent = get_parent_ns_set(myresolver, zoneorigin, timeout)
                 # we cannot find NS set of parent zone for root zone
                 # in this case, the check is ignored
                 if not ns_parent:
@@ -301,7 +303,7 @@ def resolve_name(resolver, qname, qtype):
     return result
 
 
-def get_parent_ns_set(resolver, origin):
+def get_parent_ns_set(resolver, origin, timeout):
     """ Returns NS set of zone delegation in parent zone. """
     # We could do a top-down or bottom-up approach to find the
     # parent zone. We use the bottom-up approach because we assume
@@ -340,7 +342,7 @@ def get_parent_ns_set(resolver, origin):
             for rrset in answers:
                 address = rrset.address
                 logger.debug("asking parent nameserver at address " + address)
-                response = dns.query.udp(request, address, timeout=3.0)
+                response = dns.query.udp(request, address, timeout=timeout)
                 res_auth = response.authority
                 res_ans = response.answer
                 if res_auth or res_ans:
@@ -376,8 +378,8 @@ def get_parent_ns_set(resolver, origin):
 
 if __name__ == "__main__":
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "hvx:n:o:r:k:i:", \
-        ["help", "verbose", "policy", "origin", "nameserver", "resolver", "keyfile", "zonefile"])
+        opts, args = getopt.getopt(sys.argv[1:], "hvx:n:o:r:k:i:t:", \
+        ["help", "verbose", "policy", "origin", "nameserver", "resolver", "keyfile", "zonefile", "timeout"])
     except getopt.GetoptError as err:
         # print help information and exit:
         print(err) # will print something like "option -a not recognized"
@@ -390,6 +392,7 @@ if __name__ == "__main__":
     resolver = None
     keyfile = None
     zonefile = None
+    timeout = 3.0
     # Do all checks by default
     check_policy = {"NS":True, "MX":True, "CNAME":True, "SRV":True, "DNAME":True}
 
@@ -424,6 +427,8 @@ if __name__ == "__main__":
             if not os.access(zonefile, os.R_OK):
                 print("Error: zonefile not found or not readable")
                 sys.exit()
+        elif o in ("-t", "--timeout"):
+            timeout = float(value)
         elif o in ("-h", "--help"):
             usage()
             sys.exit()
@@ -451,7 +456,7 @@ if __name__ == "__main__":
         # collect zone records to verify
         zoneparsed = parse_zone(zonedata, check_policy)
         # resolve records and print issues
-        check_zone(zoneparsed, zoneorigin)
+        check_zone(zoneparsed, zoneorigin, timeout)
 
     except Exception, e:
         print("Error: " + str(e) + ", aborted!")
