@@ -23,6 +23,7 @@ OPTIONS:
 -k keyfile    specify tsig key file for zone transfer access
 -x policy     comma seperated list of qtype to check. default if not
               specified: NS,MX,CNAME,SRV,DNAME
+-t timeout    DNS query timeout (default 3 sec)
 -v            verbose output (debugging)
 -h            print this help
 ```
