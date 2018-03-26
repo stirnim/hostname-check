@@ -2,12 +2,12 @@
 Checks if out-of-bailiwick hostname of a zone are resolvable
 
 ## Dependencies
- * [python2](https://www.python.org/)
+ * [python3](https://www.python.org/)
  * [dnspython](http://www.dnspython.org/)
 
-If you have installed python you should be able to install dnsypthon with command `pip`:
+If you have installed python you should be able to install dnsypthon with command `pip3`:
 ```
-pip install dnspython
+pip3 install dnspython
 ```
 
 ## Usage

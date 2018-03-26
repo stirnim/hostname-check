@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 This script checks RR of a zone which have a QTYPE with
 an external (out-of-bailiwick) hostname. It will check
@@ -29,19 +29,19 @@ import traceback
 
 
 def usage():
-    print sys.argv[0] + ' OPTIONS [-n address|-i zonefile] -o origin'
-    print '-o origin     zone origin e.g. switch.ch'
-    print '-n address    get zone via zone transfer from nameserver ip address'
-    print '-i zonefile   read zone from file (BIND zone format)'
-    print ''
-    print 'OPTIONS:'
-    print '-r address    recursive resolver ip address instead of system default'
-    print '-k keyfile    specify tsig key file for zone transfer access'
-    print '-x policy     comma seperated list of qtype to check. default if not'
-    print '              specified: NS,MX,CNAME,SRV,DNAME'
-    print '-t timeout    DNS query timeout (default 3 sec)'
-    print '-v            verbose output (debugging)'
-    print '-h            print this help'
+    print(sys.argv[0] + ' OPTIONS [-n address|-i zonefile] -o origin')
+    print('-o origin     zone origin e.g. switch.ch')
+    print('-n address    get zone via zone transfer from nameserver ip address')
+    print('-i zonefile   read zone from file (BIND zone format)')
+    print('')
+    print('OPTIONS:')
+    print('-r address    recursive resolver ip address instead of system default')
+    print('-k keyfile    specify tsig key file for zone transfer access')
+    print('-x policy     comma seperated list of qtype to check. default if not')
+    print('              specified: NS,MX,CNAME,SRV,DNAME')
+    print('-t timeout    DNS query timeout (default 3 sec)')
+    print('-v            verbose output (debugging)')
+    print('-h            print this help')
     sys.exit()
 
 
@@ -54,8 +54,8 @@ def read_tsigkey(tsig_key_file):
             key_struct = key_file.read()
         logger.debug("tsig key: file successfully opened")
     except IOError:
-        raise Exception, "A problem was encountered opening the keyfile, " \
-                         + tsig_key_file + "."
+        raise Exception("A problem was encountered opening the keyfile, " \
+                         + tsig_key_file + ".")
 
     try:
         # re.DOTALL matches any line including newline
@@ -65,7 +65,7 @@ def read_tsigkey(tsig_key_file):
             key_name = match.group(1)
             key_data = match.group(2)
         else:
-            raise Exception, "tsig key: no key found in file"
+            raise Exception("tsig key: no key found in file")
         logger.debug("tsig key: found key " + key_name)
 
         # parse algorithm and key from found key statement
@@ -78,13 +78,13 @@ def read_tsigkey(tsig_key_file):
         hmac_hash_md5 = dns.name.from_text("hmac-md5")
         if hmac_hash != hmac_hash_md5:
             if not hmac_hash in dns.tsig._hashes:
-                raise Exception, "tsig key: unsupported algorithm " \
-                                 + algorithm + " found"
+                raise Exception("tsig key: unsupported algorithm " \
+                                 + algorithm + " found")
         logger.debug("tsig key: valid algorithm found")
         tsig_secret = re.search(r"secret \"(.*?)\"", key_data, re.DOTALL).group(1)
         logger.debug("tsig key: valid secret found")
     except AttributeError:
-        raise Exception, "Unable to decipher the keyname and secret from your key file"
+        raise Exception("Unable to decipher the keyname and secret from your key file")
 
     keyring = dns.tsigkeyring.from_text({
             key_name : tsig_secret
@@ -102,12 +102,12 @@ def zone_transfer(nameserver, zoneorigin, keyring):
         zone = dns.zone.from_xfr(dns.query.xfr(nameserver, zoneorigin, \
                keyring=keyring))
     except dns.exception.FormError:
-        raise Exception, "Zone transfer failed. You may need to provide a keyfile."
-    except dns.tsig.PeerBadKey, e:
-        raise Exception, "tsig key: " + str(e)
-    except socket.gaierror, e:
-        raise Exception, "Problems querying DNS server " + nameserver \
-                         + ": " + str(e)
+        raise Exception("Zone transfer failed. You may need to provide a keyfile.")
+    except dns.tsig.PeerBadKey as e:
+        raise Exception("tsig key: {0}".format(e))
+    except socket.gaierror as e:
+        raise Exception("Problems querying DNS server " + nameserver \
+                         + ": {0}".format(e))
     logger.debug("zone transfer succeeded")
 
     return zone
@@ -120,9 +120,9 @@ def read_zonefile(filename, zoneorigin):
         logger = logging.getLogger()
         zone = dns.zone.from_file(filename, origin=zoneorigin, allow_include=True)
     except dns.zone.UnknownOrigin:
-        raise Exception, "No zone origin found in zone. Please specify zone name"
-    except dns.exception.DNSException, e:
-        raise Exception, "Reading zone file failed. Check your zone file"
+        raise Exception("No zone origin found in zone. Please specify zone name")
+    except dns.exception.DNSException as e:
+        raise Exception("Reading zone file failed: {0}".format(e))
     logger.debug("reading zone file succeeded")
 
     return zone
@@ -193,7 +193,7 @@ def parse_zone(z, check_policy):
                             dname_dict[origin] = rrset.target.to_text().lower()
 
     except dns.exception.FormError:
-        raise Exception, "Parsing the zone failed. Check your zone records"
+        raise Exception("Parsing the zone failed. Check your zone records")
 
     zoneparsed = {'NS':ns_dict, 'CNAME':cname_dict, 'MX':mx_dict, \
                   'SRV':srv_dict, 'DNAME':dname_dict}
@@ -219,7 +219,7 @@ def check_zone(zoneparsed, zoneorigin, timeout):
         zoneorigin = zoneorigin + "."
 
     result_dict = zoneparsed.get("NS")
-    for owner, ns_zone in result_dict.iteritems():
+    for owner, ns_zone in iter(result_dict.items()):
         try:
             status = None
             # Zone apex NS rrset needs different checks. We cannot ask resolver
@@ -240,7 +240,7 @@ def check_zone(zoneparsed, zoneorigin, timeout):
             # This only applies to queries to our resolver.
             # Has nothing to do with zone check itself. Abort
             # if occurs as it means resolver is unavailable.
-            raise Exception, "Query to resolver timed out"
+            raise Exception("Query to resolver timed out")
         except dns.resolver.NXDOMAIN:
             # We expect that the queried resolvers follows RFC 6604
             # and returns NXDOMAIN if the final hostname of a CNAME
@@ -252,18 +252,18 @@ def check_zone(zoneparsed, zoneorigin, timeout):
             status = "no nameserver reachable (timeout)"
 
         if status != None:
-            print "Resolution of delegation %s failed: %s" % (owner, status)
+            print("Resolution of delegation %s failed: %s" % (owner, status))
         else:
             if len(ns_parent_missing) > 0:
                 for nameserver in ns_parent_missing:
-                    print "Glue record mismatch for %s: NS missing in parent %s" % (owner, nameserver)
+                    print("Glue record mismatch for %s: NS missing in parent %s" % (owner, nameserver))
             if len(ns_child_missing) > 0:
                 for nameserver in ns_child_missing:
-                    print "Glue record mismatch for %s: NS missing in child %s" % (owner, nameserver)
+                    print("Glue record mismatch for %s: NS missing in child %s" % (owner, nameserver))
 
     for qtype in ["CNAME", "MX", "SRV", "DNAME"]:
         result_dict = zoneparsed.get(qtype)
-        for owner, rdata in result_dict.iteritems():
+        for owner, rdata in iter(result_dict.items()):
             try:
                 status = None
                 # We don't know which qtype exist for the target hostname.
@@ -273,7 +273,7 @@ def check_zone(zoneparsed, zoneorigin, timeout):
                 # This only applies to queries to our resolver.
                 # Has nothing to do with zone check itself. Abort
                 # if occurs as it means resolver is unavailable.
-                raise Exception, "Query to resolver timed out"
+                raise Exception("Query to resolver timed out")
             except dns.resolver.YXDOMAIN:
                 # We don't know if any target hostname lookup
                 # requires DNAME processing by the resolver and
@@ -285,8 +285,8 @@ def check_zone(zoneparsed, zoneorigin, timeout):
                 status = "timeout"
 
             if status != None:
-                print "Resolution of %s %s target %s failed: %s" \
-                      % (qtype, owner, rdata, status)
+                print("Resolution of %s %s target %s failed: %s" \
+                      % (qtype, owner, rdata, status))
 
 
 def resolve_name(resolver, qname, qtype):
@@ -459,10 +459,10 @@ if __name__ == "__main__":
         # resolve records and print issues
         check_zone(zoneparsed, zoneorigin, timeout)
 
-    except Exception, e:
+    except Exception as e:
         if verbose:
             traceback.print_exc()
         else:
-            print("Error: " + str(e) + ", aborted!")
+            print("Error: {0}, aborted!".format(e))
             sys.exit(1)
 
