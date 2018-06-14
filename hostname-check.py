@@ -9,7 +9,8 @@ Specifically, this scripts supports rdata hostname checks of the
 QTYPEs NS, CNAME, MX, SRV and DNAME.
 
 The script sends DNS queries to your local resolver but also
-to authoritative name servers directly.
+to authoritative name servers directly. Zone apex NS rrset checks
+are skipped if queries to authoritative name servers fail.
 
 Author: Daniel Stirnimann <daniel.stirnimann@switch.ch>
 '''
@@ -226,9 +227,11 @@ def check_zone(zoneparsed, zoneorigin, timeout):
             # for NS rrset as this would return zone apex NS rrset again.
             if owner == zoneorigin:
                 ns_parent = get_parent_ns_set(myresolver, zoneorigin, timeout)
-                # we cannot find NS set of parent zone for root zone
-                # in this case, the check is ignored
+                # ns_parent is empty for the root zone or if authoritative
+                # name servers could not be contacted directly. In these cases
+                # we skip the zone apex NS rrset check silently.
                 if not ns_parent:
+                    logger.debug("Zone apex NS rrset check skipped")
                     ns_parent = ns_zone
                 ns_child_missing = set(ns_parent) - set(ns_zone)
                 ns_parent_missing = set(ns_zone) - set(ns_parent)
@@ -336,6 +339,7 @@ def get_parent_ns_set(resolver, origin, timeout):
 
     # find name server address
     request = dns.message.make_query(origin, dns.rdatatype.NS)
+    query_error = 0
     for nameserver in ns_set:
         try:
             logger.debug("lookup parent nameserver address " + nameserver)
@@ -357,10 +361,17 @@ def get_parent_ns_set(resolver, origin, timeout):
                 continue
             break
         except Exception as e:
+            query_error += 1
             logger.debug("error on nameserver lookup: " + str(e))
+            # We skip the zone apex NS check if multiple queries fail
+            # (likely causes by policies restricting direct DNS access
+            #  to the Internet)
+            if query_error > 3:
+                ns_set = []
+                break
 
     ns_parent = []
-    # we cannot find parent of root zone
+    # if we cannot find the NS records for the parent zone
     # we return an empty list, this will result in errors for the root zone
     if not ns_set:
         return ns_parent
