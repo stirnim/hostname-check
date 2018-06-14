@@ -31,3 +31,6 @@ OPTIONS:
 Notes:
  * tsig key file expects a BIND key file ([See also BIND ARM](https://ftp.isc.org/isc/bind9/cur/9.11/doc/arm/Bv9ARM.ch04.html#tsig))
  * The script sends DNS queries to your local resolver but also to authoritative name servers directly
+
+## License
+Licensed under the term of [MIT License](https://en.wikipedia.org/wiki/MIT_License).

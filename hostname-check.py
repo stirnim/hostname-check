@@ -1,18 +1,37 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2018 Daniel Stirnimann (daniel.stirnimann@switch.ch)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 '''
-This script checks RR of a zone which have a QTYPE with
-an external (out-of-bailiwick) hostname. It will check
-if these hostnames are resolvable or in the case of QTYPE
-NS, whether there is mismatch between parent and child zone.
+ This script checks RR of a zone which have a QTYPE with
+ an external (out-of-bailiwick) hostname. It will check
+ if these hostnames are resolvable or in the case of QTYPE
+ NS, whether there is mismatch between parent and child zone.
 
-Specifically, this scripts supports rdata hostname checks of the
-QTYPEs NS, CNAME, MX, SRV and DNAME.
+ Specifically, this scripts supports rdata hostname checks of the
+ QTYPEs NS, CNAME, MX, SRV and DNAME.
 
-The script sends DNS queries to your local resolver but also
-to authoritative name servers directly. Zone apex NS rrset checks
-are skipped if queries to authoritative name servers fail.
-
-Author: Daniel Stirnimann <daniel.stirnimann@switch.ch>
+ The script sends DNS queries to your local resolver but also
+ to authoritative name servers directly. Zone apex NS rrset checks
+ are skipped if queries to authoritative name servers fail.
 '''
 
 import getopt, sys
