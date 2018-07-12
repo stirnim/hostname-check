@@ -195,22 +195,24 @@ def parse_zone(z, check_policy):
                 if rdataset.rdtype == dns.rdatatype.CNAME  and check_policy['CNAME']:
                     for rrset in rdataset.items:
                         if rrset.target.to_text().endswith("."):
-                            cname_dict[origin] = rrset.target.to_text().lower()
+                            cname_dict[origin] = [rrset.target.to_text().lower()]
 
                 if rdataset.rdtype == dns.rdatatype.MX and check_policy['MX']:
+                    mx_exchange_list = []
                     for rrset in rdataset.items:
                         if rrset.exchange.to_text().endswith("."):
-                            mx_dict[origin] = rrset.exchange.to_text().lower()
+                            mx_exchange_list.append( rrset.exchange.to_text().lower() )
+                    mx_dict[origin] = mx_exchange_list
 
                 if rdataset.rdtype == dns.rdatatype.SRV and check_policy['SRV']:
                     for rrset in rdataset.items:
                         if rrset.target.to_text().endswith("."):
-                            srv_dict[origin] = rrset.target.to_text().lower()
+                            srv_dict[origin] = [rrset.target.to_text().lower()]
 
                 if rdataset.rdtype == dns.rdatatype.DNAME and check_policy['DNAME']:
                     for rrset in rdataset.items:
                         if rrset.target.to_text().endswith("."):
-                            dname_dict[origin] = rrset.target.to_text().lower()
+                            dname_dict[origin] = [rrset.target.to_text().lower()]
 
     except dns.exception.FormError:
         raise Exception("Parsing the zone failed. Check your zone records")
@@ -285,30 +287,31 @@ def check_zone(zoneparsed, zoneorigin, timeout):
 
     for qtype in ["CNAME", "MX", "SRV", "DNAME"]:
         result_dict = zoneparsed.get(qtype)
-        for owner, rdata in iter(result_dict.items()):
-            try:
-                status = None
-                # We don't know which qtype exist for the target hostname.
-                # NoAnswer is not treated as an error.
-                answers = resolve_name(myresolver, rdata, "A")
-            except dns.exception.Timeout:
-                # This only applies to queries to our resolver.
-                # Has nothing to do with zone check itself. Abort
-                # if occurs as it means resolver is unavailable.
-                raise Exception("Query to resolver timed out")
-            except dns.resolver.YXDOMAIN:
-                # We don't know if any target hostname lookup
-                # requires DNAME processing by the resolver and
-                # may overflow legal size of domain names.
-                status = "yxdomain"
-            except dns.resolver.NXDOMAIN:
-                status = "nxdomain"
-            except dns.resolver.NoNameservers:
-                status = "timeout"
+        for owner, rdataList in iter(result_dict.items()):
+            for rdata in rdataList:
+                try:
+                    status = None
+                    # We don't know which qtype exist for the target hostname.
+                    # NoAnswer is not treated as an error.
+                    answers = resolve_name(myresolver, rdata, "A")
+                except dns.exception.Timeout:
+                    # This only applies to queries to our resolver.
+                    # Has nothing to do with zone check itself. Abort
+                    # if occurs as it means resolver is unavailable.
+                    raise Exception("Query to resolver timed out")
+                except dns.resolver.YXDOMAIN:
+                    # We don't know if any target hostname lookup
+                    # requires DNAME processing by the resolver and
+                    # may overflow legal size of domain names.
+                    status = "yxdomain"
+                except dns.resolver.NXDOMAIN:
+                    status = "nxdomain"
+                except dns.resolver.NoNameservers:
+                    status = "timeout"
 
-            if status != None:
-                print("Resolution of %s %s target %s failed: %s" \
-                      % (qtype, owner, rdata, status))
+                if status != None:
+                    print("Resolution of %s %s target %s failed: %s" \
+                        % (qtype, owner, rdata, status))
 
 
 def resolve_name(resolver, qname, qtype):
