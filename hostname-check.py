@@ -280,10 +280,10 @@ def check_zone(zoneparsed, zoneorigin, timeout):
         else:
             if len(ns_parent_missing) > 0:
                 for nameserver in ns_parent_missing:
-                    print("Glue record mismatch for %s: NS missing in parent %s" % (owner, nameserver))
+                    print("Referral mismatch for %s: NS missing in parent %s" % (owner, nameserver))
             if len(ns_child_missing) > 0:
                 for nameserver in ns_child_missing:
-                    print("Glue record mismatch for %s: NS missing in child %s" % (owner, nameserver))
+                    print("Referral mismatch for %s: NS missing in child %s" % (owner, nameserver))
 
     for qtype in ["CNAME", "MX", "SRV", "DNAME"]:
         result_dict = zoneparsed.get(qtype)
