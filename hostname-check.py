@@ -362,6 +362,7 @@ def get_parent_ns_set(resolver, origin, timeout):
     # find name server address
     request = dns.message.make_query(origin, dns.rdatatype.NS)
     query_error = 0
+    has_answer = False
     for nameserver in ns_set:
         try:
             logger.debug("lookup parent nameserver address " + nameserver)
@@ -378,6 +379,7 @@ def get_parent_ns_set(resolver, origin, timeout):
                     # so either case is valid.
                     # If we rely on the answer section, the check is meaningless
                     # as the response contains the NS rrset we already know.
+                    has_answer = True
                     break
             else:
                 continue
@@ -386,16 +388,15 @@ def get_parent_ns_set(resolver, origin, timeout):
             query_error += 1
             logger.debug("error on nameserver lookup: " + str(e))
             # We skip the zone apex NS check if multiple queries fail
-            # (likely causes by policies restricting direct DNS access
+            # (likely causes by a policy restricting direct DNS access
             #  to the Internet)
             if query_error > 3:
-                ns_set = []
                 break
 
     ns_parent = []
     # if we cannot find the NS records for the parent zone
     # we return an empty list, this will result in errors for the root zone
-    if not ns_set:
+    if has_answer is False:
         return ns_parent
     for rrset in res_auth:
         if rrset.rdtype == dns.rdatatype.NS:
@@ -405,7 +406,6 @@ def get_parent_ns_set(resolver, origin, timeout):
         if rrset.rdtype == dns.rdatatype.NS:
             for rr in rrset.items:
                 ns_parent.append( rr.target.to_text().lower() )
-
 
     return ns_parent
 
