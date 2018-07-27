@@ -1,11 +1,21 @@
 # hostname-check
-Checks if out-of-bailiwick hostname of a zone are resolvable
+This script checks RR of a zone which have a QTYPE with
+an external (out-of-bailiwick) hostname. It will check
+if these hostnames are resolvable or in the case of QTYPE
+NS, whether there is mismatch between parent and child zone.
+Specifically, this scripts supports rdata hostname checks of the
+QTYPEs NS, CNAME, MX, SRV and DNAME.
+
+The script sends DNS queries to your local resolver but also
+to authoritative name servers directly (only needed for zone
+apex NS rrset checks). Zone apex NS rrset checks are skipped
+if queries to authoritative name servers fail.
 
 ## Dependencies
  * [python3](https://www.python.org/)
  * [dnspython](http://www.dnspython.org/)
 
-If you have installed python you should be able to install dnsypthon with command `pip3`:
+If you have installed python you should be able to install dnsypthon with the command `pip3`:
 ```
 pip3 install dnspython
 ```
