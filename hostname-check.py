@@ -205,9 +205,11 @@ def parse_zone(z, check_policy):
                     mx_dict[origin] = mx_exchange_list
 
                 if rdataset.rdtype == dns.rdatatype.SRV and check_policy['SRV']:
+                    srv_target_list = []
                     for rrset in rdataset.items:
                         if rrset.target.to_text().endswith("."):
-                            srv_dict[origin] = [rrset.target.to_text().lower()]
+                            srv_target_list.append( rrset.target.to_text().lower() )
+                    srv_dict[origin] = srv_target_list
 
                 if rdataset.rdtype == dns.rdatatype.DNAME and check_policy['DNAME']:
                     for rrset in rdataset.items:
