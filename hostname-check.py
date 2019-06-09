@@ -183,38 +183,62 @@ def parse_zone(z, check_policy):
                 if rdataset.rdtype == dns.rdatatype.NS and check_policy['NS']:
                     ns_target_list = []
                     for rrset in rdataset.items:
-                        if rrset.target.to_text().endswith("."):
-                            ns_target_list.append( rrset.target.to_text().lower() )
-                        else:
+                        ns_target_hostname = rrset.target.to_text().lower()
+                        if not ns_target_hostname.endswith("."):
                             if zoneorigin == ".":
-                                ns_target_list.append( rrset.target.to_text().lower() + zoneorigin )
+                                ns_target_hostname += zoneorigin
                             else:
-                                ns_target_list.append( rrset.target.to_text().lower() + "." + zoneorigin )
+                                ns_target_hostname +=  "." + zoneorigin
+                        ns_target_list.append( ns_target_hostname )
                     ns_dict[origin] = ns_target_list
 
                 if rdataset.rdtype == dns.rdatatype.CNAME  and check_policy['CNAME']:
                     for rrset in rdataset.items:
-                        if rrset.target.to_text().endswith("."):
-                            cname_dict[origin] = [rrset.target.to_text().lower()]
+                        cname_target_hostname = rrset.target.to_text().lower()
+                        if not cname_target_hostname.endswith("."):
+                            if not z.get_node(cname_target_hostname) is None:
+                                continue
+                            else:
+                                cname_target_hostname += "." + zoneorigin
+                        if not [cname_target_hostname] in cname_dict.values():
+                            cname_dict[origin] = [cname_target_hostname]
 
                 if rdataset.rdtype == dns.rdatatype.MX and check_policy['MX']:
                     mx_exchange_list = []
                     for rrset in rdataset.items:
-                        if rrset.exchange.to_text().endswith("."):
-                            mx_exchange_list.append( rrset.exchange.to_text().lower() )
+                        mx_exchange_hostname = rrset.exchange.to_text().lower()
+                        if not mx_exchange_hostname.endswith("."):
+                            if not z.get_node(mx_exchange_hostname) is None:
+                                continue
+                            else:
+                                mx_exchange_hostname  += "." + zoneorigin
+                        if not is_value_in_list_of_lists(mx_exchange_hostname, mx_dict.values()):
+                            mx_exchange_list.append( mx_exchange_hostname )
                     mx_dict[origin] = mx_exchange_list
 
                 if rdataset.rdtype == dns.rdatatype.SRV and check_policy['SRV']:
                     srv_target_list = []
                     for rrset in rdataset.items:
-                        if rrset.target.to_text().endswith("."):
-                            srv_target_list.append( rrset.target.to_text().lower() )
+                        srv_target_hostname = rrset.target.to_text().lower()
+                        if not srv_target_hostname.endswith("."):
+                            if not z.get_node(srv_target_hostname) is None:
+                                continue
+                            else:
+                                srv_target_hostname += "." + zoneorigin
+                        if not is_value_in_list_of_lists(srv_target_hostname, srv_dict.values()): 
+                            srv_target_list.append( srv_target_hostname )
                     srv_dict[origin] = srv_target_list
 
                 if rdataset.rdtype == dns.rdatatype.DNAME and check_policy['DNAME']:
                     for rrset in rdataset.items:
-                        if rrset.target.to_text().endswith("."):
-                            dname_dict[origin] = [rrset.target.to_text().lower()]
+                        dname_target_hostname = rrset.target.to_text().lower()
+                        if not dname_target_hostname.endswith("."):
+                            if not z.get_node(dname_target_hostname) is None:
+                                continue
+                            else:
+                                dname_target_hostname += "." + zoneorigin
+                        if not [dname_target_hostname] in dname_dict.values():
+                            dname_dict[origin] = [dname_target_hostname]
 
     except dns.exception.FormError:
         raise Exception("Parsing the zone failed. Check your zone records")
@@ -410,6 +434,14 @@ def get_parent_ns_set(resolver, origin, timeout):
                 ns_parent.append( rr.target.to_text().lower() )
 
     return ns_parent
+
+
+def is_value_in_list_of_lists(value, list_of_lists):
+    """ Helper function to check if a value exists in a list of lists """
+    for sublist in list_of_lists:
+        if value in sublist:
+            return True
+    return False
 
 
 if __name__ == "__main__":
