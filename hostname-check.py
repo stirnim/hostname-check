@@ -225,7 +225,7 @@ def parse_zone(z, check_policy):
                                 continue
                             else:
                                 srv_target_hostname += "." + zoneorigin
-                        if not is_value_in_list_of_lists(srv_target_hostname, srv_dict.values()): 
+                        if not is_value_in_list_of_lists(srv_target_hostname, srv_dict.values()):
                             srv_target_list.append( srv_target_hostname )
                     srv_dict[origin] = srv_target_list
 
