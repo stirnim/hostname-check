@@ -50,15 +50,17 @@ import traceback
 
 def usage():
     print(sys.argv[0] + ' OPTIONS [-n address|-i zonefile] -o origin')
-    print('-o origin     zone origin e.g. switch.ch')
-    print('-n address    get zone via zone transfer from nameserver ip address')
-    print('-i zonefile   read zone from file (BIND zone format)')
+    print('-o origin     Zone origin e.g. switch.ch')
+    print('-n address    Get zone via zone transfer from nameserver ip address')
+    print('-i zonefile   Read zone from file (BIND zone format)')
     print('')
     print('OPTIONS:')
-    print('-r address    recursive resolver ip address instead of system default')
-    print('-k keyfile    specify tsig key file for zone transfer access')
-    print('-x policy     comma seperated list of qtype to check. default if not')
+    print('-r address    Recursive resolver ip address instead of system default')
+    print('-k keyfile    Specify tsig key file for zone transfer access')
+    print('-x policy     Comma seperated list of qtype to check. default if not')
     print('              specified: NS,MX,CNAME,SRV,DNAME')
+    print('-e exclude    Comma seperated list of owner name strings to skip checks.')
+    print('              Supports wildcard (*) on the right hand side of the string.')
     print('-t timeout    DNS query timeout (default 3 sec)')
     print('-v            verbose output (debugging)')
     print('-h            print this help')
@@ -148,8 +150,9 @@ def read_zonefile(filename, zoneorigin):
     return zone
 
 
-def parse_zone(z, check_policy):
-    """ Parses zone and checks QTYPEs according check_policy.
+def parse_zone(z, check_policy, exclude):
+    """ Parses zone and checks QTYPEs according check_policy and
+        owner name against exclude list.
         Returns a dictionary of records which need to be checked. """
     try:
         zoneorigin = z.origin.to_text().lower()
@@ -158,6 +161,15 @@ def parse_zone(z, check_policy):
         mx_dict = {}
         srv_dict = {}
         dname_dict = {}
+
+        # split exclude list into a list of FQDN and wildcard (labels) to exclude
+        exclude_fqdn = []
+        exclude_label = []
+        for item in exclude:
+            if item.endswith('*'):
+                exclude_label.append(item[:-1])
+            else:
+                exclude_fqdn.append(item)
 
         logger.debug("zone origin " + zoneorigin)
         # iterate through all rdatasets
@@ -174,6 +186,18 @@ def parse_zone(z, check_policy):
                     origin = owner.to_text().lower() + "." + zoneorigin
                 else:
                     origin = owner.to_text().lower() + zoneorigin
+
+            # ignore any RRset whose owner name matches an entry from the exclude list
+            skip = False
+            if origin in exclude_fqdn:
+                skip = True
+            for label in exclude_label:
+                if origin.startswith(label):
+                    skip = True
+                    continue
+            if skip:
+                # RRset is skipped
+                continue
 
             for rdataset in rdatasets:
                 # zone is read with relative names. Any name with a dot at
@@ -446,8 +470,8 @@ def is_value_in_list_of_lists(value, list_of_lists):
 
 if __name__ == "__main__":
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "hvx:n:o:r:k:i:t:", \
-        ["help", "verbose", "policy", "origin", "nameserver", "resolver", "keyfile", "zonefile", "timeout"])
+        opts, args = getopt.getopt(sys.argv[1:], "hvx:n:o:r:k:i:e:t:", \
+        ["help", "verbose", "policy", "origin", "nameserver", "resolver", "keyfile", "zonefile", "exclude", "timeout"])
     except getopt.GetoptError as err:
         # print help information and exit:
         print(err) # will print something like "option -a not recognized"
@@ -460,6 +484,7 @@ if __name__ == "__main__":
     resolver = None
     keyfile = None
     zonefile = None
+    exclude = set()
     timeout = 3.0
     # Do all checks by default
     check_policy = {"NS":True, "MX":True, "CNAME":True, "SRV":True, "DNAME":True}
@@ -481,6 +506,10 @@ if __name__ == "__main__":
                     print("Error: -x invalid policy. '" + item \
                           + "' is not a valid qtype policy")
                     sys.exit()
+        elif o in ("-e", "--exclude"):
+            values = value.split(",")
+            for item in values:
+                exclude.add(item.lower())
         elif o in ("-n", "--nameserver"):
             nameserver = value
         elif o in ("-r", "--resolver"):
@@ -522,7 +551,7 @@ if __name__ == "__main__":
             sys.exit()
 
         # collect zone records to verify
-        zoneparsed = parse_zone(zonedata, check_policy)
+        zoneparsed = parse_zone(zonedata, check_policy, exclude)
         # resolve records and print issues
         check_zone(zoneparsed, zoneorigin, timeout)
 
