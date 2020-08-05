@@ -372,7 +372,7 @@ def resolve_name(resolver, qname, qtype):
     result = []
     logger.debug("resolve " + qname + " " + qtype)
     # No answer is no error case. It can mean we tried with the wrong qtype
-    answers = resolver.query(qname, qtype, raise_on_no_answer=False)
+    answers = resolver.resolve(qname, qtype, raise_on_no_answer=False)
     if answers.rdtype == dns.rdatatype.NS and answers.rrset != None:
         for rrset in answers:
             result.append( rrset.target.to_text().lower() )
@@ -416,7 +416,7 @@ def get_parent_ns_set(resolver, origin, timeout):
     for nameserver in ns_set:
         try:
             logger.debug("lookup parent nameserver address " + nameserver)
-            answers = resolver.query(nameserver, "A", raise_on_no_answer=False)
+            answers = resolver.resolve(nameserver, "A", raise_on_no_answer=False)
             for rrset in answers:
                 address = rrset.address
                 logger.debug("asking parent nameserver at address " + address)
