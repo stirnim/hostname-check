@@ -224,8 +224,7 @@ def parse_zone(z, check_policy, exclude):
                                 continue
                             else:
                                 cname_target_hostname += "." + zoneorigin
-                        if not [cname_target_hostname] in cname_dict.values():
-                            cname_dict[origin] = [cname_target_hostname]
+                        cname_dict[origin] = [cname_target_hostname]
 
                 if rdataset.rdtype == dns.rdatatype.MX and check_policy['MX']:
                     mx_exchange_list = []
@@ -236,8 +235,7 @@ def parse_zone(z, check_policy, exclude):
                                 continue
                             else:
                                 mx_exchange_hostname  += "." + zoneorigin
-                        if not is_value_in_list_of_lists(mx_exchange_hostname, mx_dict.values()):
-                            mx_exchange_list.append( mx_exchange_hostname )
+                        mx_exchange_list.append( mx_exchange_hostname )
                     mx_dict[origin] = mx_exchange_list
 
                 if rdataset.rdtype == dns.rdatatype.SRV and check_policy['SRV']:
@@ -249,8 +247,7 @@ def parse_zone(z, check_policy, exclude):
                                 continue
                             else:
                                 srv_target_hostname += "." + zoneorigin
-                        if not is_value_in_list_of_lists(srv_target_hostname, srv_dict.values()):
-                            srv_target_list.append( srv_target_hostname )
+                        srv_target_list.append( srv_target_hostname )
                     srv_dict[origin] = srv_target_list
 
                 if rdataset.rdtype == dns.rdatatype.DNAME and check_policy['DNAME']:
@@ -261,8 +258,7 @@ def parse_zone(z, check_policy, exclude):
                                 continue
                             else:
                                 dname_target_hostname += "." + zoneorigin
-                        if not [dname_target_hostname] in dname_dict.values():
-                            dname_dict[origin] = [dname_target_hostname]
+                        dname_dict[origin] = [dname_target_hostname]
 
     except dns.exception.FormError:
         raise Exception("Parsing the zone failed. Check your zone records")
@@ -459,13 +455,6 @@ def get_parent_ns_set(resolver, origin, timeout):
 
     return ns_parent
 
-
-def is_value_in_list_of_lists(value, list_of_lists):
-    """ Helper function to check if a value exists in a list of lists """
-    for sublist in list_of_lists:
-        if value in sublist:
-            return True
-    return False
 
 
 if __name__ == "__main__":
