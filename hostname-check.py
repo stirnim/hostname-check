@@ -307,10 +307,8 @@ def check_zone(zoneparsed, zoneorigin, timeout):
                 ns_child_missing = set(ns_zone) - set(ns_child)
                 ns_parent_missing = set(ns_child) - set(ns_zone)
         except dns.exception.Timeout:
-            # This only applies to queries to our resolver.
-            # Has nothing to do with zone check itself. Abort
-            # if occurs as it means resolver is unavailable.
-            raise Exception("Query to resolver timed out")
+            # Return SERVFAIL for failed attempts to query names
+            status = "servfail"
         except dns.resolver.NXDOMAIN:
             # We expect that the queried resolvers follows RFC 6604
             # and returns NXDOMAIN if the final hostname of a CNAME
@@ -341,10 +339,8 @@ def check_zone(zoneparsed, zoneorigin, timeout):
                     # NoAnswer is not treated as an error.
                     answers = resolve_name(myresolver, rdata, "A")
                 except dns.exception.Timeout:
-                    # This only applies to queries to our resolver.
-                    # Has nothing to do with zone check itself. Abort
-                    # if occurs as it means resolver is unavailable.
-                    raise Exception("Query to resolver timed out")
+                    # Return SERVFAIL for failed attempts to query names
+                    status = "servfail"
                 except dns.resolver.YXDOMAIN:
                     # We don't know if any target hostname lookup
                     # requires DNAME processing by the resolver and
