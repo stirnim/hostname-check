@@ -44,3 +44,8 @@ Notes:
 
 ## License
 Licensed under the term of [MIT License](https://en.wikipedia.org/wiki/MIT_License).
+
+## Alternatives
+
+You might also want to check out the following tools with the same goal:
+ * https://github.com/yahoo/SubdomainSleuth
