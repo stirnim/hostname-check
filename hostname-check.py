@@ -26,8 +26,8 @@
  if these hostnames are resolvable or in the case of QTYPE
  NS, whether there is mismatch between parent and child zone.
 
- Specifically, this scripts supports rdata hostname checks of the
- QTYPEs NS, CNAME, MX, SRV and DNAME.
+ In addition, it checks a common typo in hostnames where the
+ user enters a FQDN but forgets to add a dot at the end.
 
  The script sends DNS queries to your local resolver but also
  to authoritative name servers directly. Zone apex NS rrset checks
@@ -57,8 +57,8 @@ def usage():
     print('OPTIONS:')
     print('-r address    Recursive resolver ip address instead of system default')
     print('-k keyfile    Specify tsig key file for zone transfer access')
-    print('-x policy     Comma seperated list of qtype to check. default if not')
-    print('              specified: NS,MX,CNAME,SRV,DNAME')
+    print('-x policy     Comma seperated list of checks to execute. default if not')
+    print('              specified: NS,MX,CNAME,SRV,DNAME,NODOT')
     print('-e exclude    Comma seperated list of owner name strings to skip checks.')
     print('              Supports wildcard (*) on the right hand side of the string.')
     print('-t timeout    DNS query timeout (default 3 sec)')
@@ -99,7 +99,7 @@ def read_tsigkey(tsig_key_file):
         # following works around this.
         hmac_hash_md5 = dns.name.from_text("hmac-md5")
         if hmac_hash != hmac_hash_md5:
-            if not hmac_hash in dns.tsig._hashes:
+            if not hmac_hash in dns.tsig.HMACTSig._hashes:
                 raise Exception("tsig key: unsupported algorithm " \
                                  + algorithm + " found")
         logger.debug("tsig key: valid algorithm found")
@@ -156,11 +156,13 @@ def parse_zone(z, check_policy, exclude):
         Returns a dictionary of records which need to be checked. """
     try:
         zoneorigin = z.origin.to_text().lower()
+        nodot_zoneorigin = zoneorigin[:-1]
         ns_dict = {}
         cname_dict = {}
         mx_dict = {}
         srv_dict = {}
         dname_dict = {}
+        nodot_dict = {}
 
         # split exclude list into a list of FQDN and wildcard (labels) to exclude
         exclude_fqdn = []
@@ -198,6 +200,12 @@ def parse_zone(z, check_policy, exclude):
             if skip:
                 # RRset is skipped
                 continue
+
+            # check if (relative) owner name ends with the zone origin. This means
+            # that the user forgot to add a dot (.) at the end.
+            if not zoneorigin.startswith(".") and check_policy['NODOT']:
+                if owner.to_text().endswith(nodot_zoneorigin):
+                    nodot_dict[origin] = owner.to_text()
 
             for rdataset in rdatasets:
                 # zone is read with relative names. Any name with a dot at
@@ -264,7 +272,7 @@ def parse_zone(z, check_policy, exclude):
         raise Exception("Parsing the zone failed. Check your zone records")
 
     zoneparsed = {'NS':ns_dict, 'CNAME':cname_dict, 'MX':mx_dict, \
-                  'SRV':srv_dict, 'DNAME':dname_dict}
+                  'SRV':srv_dict, 'DNAME':dname_dict, 'NODOT':nodot_dict}
 
     return zoneparsed
 
@@ -285,6 +293,10 @@ def check_zone(zoneparsed, zoneorigin, timeout):
     # parent zone
     if not zoneorigin.endswith("."):
         zoneorigin = zoneorigin + "."
+
+    result_dict = zoneparsed.get("NODOT")
+    for owner, owner_relative in iter(result_dict.items()):
+        print("No final dot in hostname %s leads to expansion %s" % (owner_relative, owner))
 
     result_dict = zoneparsed.get("NS")
     for owner, ns_zone in iter(result_dict.items()):
@@ -307,7 +319,7 @@ def check_zone(zoneparsed, zoneorigin, timeout):
                 ns_child_missing = set(ns_zone) - set(ns_child)
                 ns_parent_missing = set(ns_child) - set(ns_zone)
         except dns.exception.Timeout:
-            # Return SERVFAIL for failed attempts to query names
+            # Return SERVFAIL for failed attempts to query names.
             status = "servfail"
         except dns.resolver.NXDOMAIN:
             # We expect that the queried resolvers follows RFC 6604
@@ -339,7 +351,7 @@ def check_zone(zoneparsed, zoneorigin, timeout):
                     # NoAnswer is not treated as an error.
                     answers = resolve_name(myresolver, rdata, "A")
                 except dns.exception.Timeout:
-                    # Return SERVFAIL for failed attempts to query names
+                    # Return SERVFAIL for failed attempts to query names.
                     status = "servfail"
                 except dns.resolver.YXDOMAIN:
                     # We don't know if any target hostname lookup
@@ -452,7 +464,6 @@ def get_parent_ns_set(resolver, origin, timeout):
     return ns_parent
 
 
-
 if __name__ == "__main__":
     try:
         opts, args = getopt.getopt(sys.argv[1:], "hvx:n:o:r:k:i:e:t:", \
@@ -472,7 +483,7 @@ if __name__ == "__main__":
     exclude = set()
     timeout = 3.0
     # Do all checks by default
-    check_policy = {"NS":True, "MX":True, "CNAME":True, "SRV":True, "DNAME":True}
+    check_policy = {"NS":True, "MX":True, "CNAME":True, "SRV":True, "DNAME":True, "NODOT":True}
 
     for o, value in opts:
         if o in ("-v", "--verbose"):
@@ -482,7 +493,7 @@ if __name__ == "__main__":
         elif o in ("-x", "--policy"):
             # If policy argument is used, we only check qtypes
             # specified in argument. Therefore, default False
-            check_policy = {"NS":False, "MX":False, "CNAME":False, "SRV":False, "DNAME":False}
+            check_policy = {"NS":False, "MX":False, "CNAME":False, "SRV":False, "DNAME":False, "NODOT":False}
             values = value.split(",")
             for item in values:
                 if item in check_policy:
