@@ -20,541 +20,565 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-'''
- This script checks RR of a zone which have a QTYPE with
- an external (out-of-bailiwick) hostname. It will check
- if these hostnames are resolvable or in the case of QTYPE
- NS, whether there is mismatch between parent and child zone.
+"""
+Check resource records of a zone for out-of-bailiwick hostnames.
 
- In addition, it checks a common typo in hostnames where the
- user enters a FQDN but forgets to add a dot at the end.
+The script verifies that NS/CNAME/MX/SRV/DNAME targets resolve, that the
+parent and child NS rrsets agree at the apex, and flags a common typo
+where a fully-qualified hostname is missing its trailing dot.
 
- The script sends DNS queries to your local resolver but also
- to authoritative name servers directly. Zone apex NS rrset checks
- are skipped if queries to authoritative name servers fail.
-'''
+Lookups are issued concurrently against the configured recursive resolver
+(via dnspython's async interface) and, for the apex NS check, directly
+against authoritative name servers. Apex NS checks are skipped silently
+if authoritative servers cannot be reached.
 
-import getopt, sys
+Requires Python >= 3.11 and dnspython >= 2.0.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
 import logging
-import os
 import re
 import socket
-import dns.query
-import dns.zone
-import dns.tsigkeyring
+import sys
+from pathlib import Path
+
+import dns.asyncquery
+import dns.asyncresolver
 import dns.exception
-import dns.resolver
 import dns.message
-import traceback
+import dns.name
+import dns.query
+import dns.rdatatype
+import dns.resolver
+import dns.tsig
+import dns.tsigkeyring
+import dns.zone
+
+CHECK_TYPES: tuple[str, ...] = ("NS", "MX", "CNAME", "SRV", "DNAME", "NODOT")
+DEFAULT_TIMEOUT = 3.0
+DEFAULT_CONCURRENCY = 32
+PARENT_NS_QUERY_ERROR_BUDGET = 3
+
+logger = logging.getLogger("hostname-check")
 
 
-def usage():
-    print(sys.argv[0] + ' OPTIONS [-n address|-i zonefile] -o origin')
-    print('-o origin     Zone origin e.g. switch.ch')
-    print('-n address    Get zone via zone transfer from nameserver ip address')
-    print('-i zonefile   Read zone from file (BIND zone format)')
-    print('')
-    print('OPTIONS:')
-    print('-r address    Recursive resolver ip address instead of system default')
-    print('-k keyfile    Specify tsig key file for zone transfer access')
-    print('-x policy     Comma seperated list of checks to execute. default if not')
-    print('              specified: NS,MX,CNAME,SRV,DNAME,NODOT')
-    print('-e exclude    Comma seperated list of owner name strings to skip checks.')
-    print('              Supports wildcard (*) on the right hand side of the string.')
-    print('-t timeout    DNS query timeout (default 3 sec)')
-    print('-v            verbose output (debugging)')
-    print('-h            print this help')
-    sys.exit()
-
-
-def read_tsigkey(tsig_key_file):
-    """ Accept a TSIG keyfile. Return a keyring object with the key name and
-        TSIG secret of the first found TSIG key. """
+def read_tsigkey(tsig_key_file: Path) -> dict:
+    """Parse a BIND-style TSIG key file and return a dnspython keyring."""
     try:
-        logger = logging.getLogger()
-        with open(tsig_key_file, 'r') as key_file:
-            key_struct = key_file.read()
-        logger.debug("tsig key: file successfully opened")
-    except IOError:
-        raise Exception("A problem was encountered opening the keyfile, " \
-                         + tsig_key_file + ".")
+        key_struct = tsig_key_file.read_text()
+    except OSError as exc:
+        raise RuntimeError(f"Cannot open keyfile {tsig_key_file}: {exc}") from exc
+    logger.debug("tsig key: file %s opened", tsig_key_file)
 
+    match = re.search(
+        r'key "?([a-zA-Z0-9_.-]+)"? \{(.*?)\};', key_struct, re.DOTALL
+    )
+    if not match:
+        raise RuntimeError("tsig key: no key found in file")
+    key_name, key_data = match.group(1), match.group(2)
+    logger.debug("tsig key: found key %s", key_name)
+
+    algo_match = re.search(r'algorithm "?([a-zA-Z0-9_-]+?)"?;', key_data, re.DOTALL)
+    secret_match = re.search(r'secret "(.*?)"', key_data, re.DOTALL)
+    if not algo_match or not secret_match:
+        raise RuntimeError("Unable to decipher key name and secret from key file")
+
+    algorithm = algo_match.group(1)
+    hmac_hash = dns.name.from_text(algorithm.lower())
+    # dns.tsig.HMAC_MD5 has the long form name HMAC-MD5.SIG-ALG.REG.INT., so
+    # special case it instead of looking it up in the supported-hashes table.
+    if hmac_hash != dns.name.from_text("hmac-md5"):
+        if hmac_hash not in dns.tsig.HMACTSig._hashes:
+            raise RuntimeError(f"tsig key: unsupported algorithm {algorithm}")
+    logger.debug("tsig key: valid algorithm and secret found")
+
+    return dns.tsigkeyring.from_text({key_name: secret_match.group(1)})
+
+
+def zone_transfer(nameserver: str, zoneorigin: str, keyring: dict | None) -> dns.zone.Zone:
+    """Fetch a zone via AXFR from ``nameserver``."""
     try:
-        # re.DOTALL matches any line including newline
-        match = re.search(r"key \"?([a-zA-Z0-9_.-]+)\"? \{(.*?)\}\;", \
-                          key_struct, re.DOTALL)
-        if match:
-            key_name = match.group(1)
-            key_data = match.group(2)
-        else:
-            raise Exception("tsig key: no key found in file")
-        logger.debug("tsig key: found key " + key_name)
-
-        # parse algorithm and key from found key statement
-        algorithm = re.search(r"algorithm \"?([a-zA-Z0-9_-]+?)\"?\;", \
-                              key_data, re.DOTALL).group(1)
-        hmac_hash = dns.name.from_text(algorithm.lower())
-        # dns.tsig.HMAC_MD5 is called HMAC-MD5.SIG-ALG.REG.INT.
-        # As a result we cannot compare an hmac-md5 name. The
-        # following works around this.
-        hmac_hash_md5 = dns.name.from_text("hmac-md5")
-        if hmac_hash != hmac_hash_md5:
-            if not hmac_hash in dns.tsig.HMACTSig._hashes:
-                raise Exception("tsig key: unsupported algorithm " \
-                                 + algorithm + " found")
-        logger.debug("tsig key: valid algorithm found")
-        tsig_secret = re.search(r"secret \"(.*?)\"", key_data, re.DOTALL).group(1)
-        logger.debug("tsig key: valid secret found")
-    except AttributeError:
-        raise Exception("Unable to decipher the keyname and secret from your key file")
-
-    keyring = dns.tsigkeyring.from_text({
-            key_name : tsig_secret
-    })
-
-    return keyring
-
-
-def zone_transfer(nameserver, zoneorigin, keyring):
-    """ Attempts zone transfer with arguments provided.
-        Requires: nameserver, zoneorigin, Optional: keyring
-        Returns full zone content. """
-    try:
-        logger = logging.getLogger()
-        zone = dns.zone.from_xfr(dns.query.xfr(nameserver, zoneorigin, \
-               keyring=keyring))
-    except dns.exception.FormError:
-        raise Exception("Zone transfer failed. You may need to provide a keyfile.")
-    except dns.tsig.PeerBadKey as e:
-        raise Exception("tsig key: {0}".format(e))
-    except socket.gaierror as e:
-        raise Exception("Problems querying DNS server " + nameserver \
-                         + ": {0}".format(e))
+        zone = dns.zone.from_xfr(
+            dns.query.xfr(nameserver, zoneorigin, keyring=keyring)
+        )
+    except dns.exception.FormError as exc:
+        raise RuntimeError("Zone transfer failed. You may need to provide a keyfile.") from exc
+    except dns.tsig.PeerBadKey as exc:
+        raise RuntimeError(f"tsig key: {exc}") from exc
+    except socket.gaierror as exc:
+        raise RuntimeError(f"Problems querying DNS server {nameserver}: {exc}") from exc
     logger.debug("zone transfer succeeded")
-
     return zone
 
 
-def read_zonefile(filename, zoneorigin):
-    """ Attempts to read zone content from file.
-        Returns full zone content. """
+def read_zonefile(filename: Path, zoneorigin: str | None) -> dns.zone.Zone:
+    """Load a zone from a BIND-format zone file."""
     try:
-        logger = logging.getLogger()
-        zone = dns.zone.from_file(filename, origin=zoneorigin, allow_include=True)
-    except dns.zone.UnknownOrigin:
-        raise Exception("No zone origin found in zone. Please specify zone name")
-    except dns.exception.DNSException as e:
-        raise Exception("Reading zone file failed: {0}".format(e))
+        zone = dns.zone.from_file(str(filename), origin=zoneorigin, allow_include=True)
+    except dns.zone.UnknownOrigin as exc:
+        raise RuntimeError("No zone origin found in zone. Please specify zone name") from exc
+    except dns.exception.DNSException as exc:
+        raise RuntimeError(f"Reading zone file failed: {exc}") from exc
     logger.debug("reading zone file succeeded")
-
     return zone
 
 
-def parse_zone(z, check_policy, exclude):
-    """ Parses zone and checks QTYPEs according check_policy and
-        owner name against exclude list.
-        Returns a dictionary of records which need to be checked. """
+def _qualify(name: str, zoneorigin: str) -> str:
+    """Append the zone origin to a relative ``name``."""
+    if name.endswith("."):
+        return name
+    if zoneorigin == ".":
+        return name + zoneorigin
+    return f"{name}.{zoneorigin}"
+
+
+class ExcludeMatcher:
+    """Matches names against an exclude list with optional wildcards.
+
+    Each entry in the source set is interpreted as one of:
+      * ``foo.example.``  — exact match
+      * ``foo.*``         — prefix match (matches anything starting with ``foo.``)
+      * ``*.example.``    — suffix match (matches anything ending with ``.example.``)
+    """
+
+    __slots__ = ("exact", "prefixes", "suffixes")
+
+    def __init__(self, entries: set[str]) -> None:
+        self.exact: set[str] = set()
+        self.prefixes: list[str] = []
+        self.suffixes: list[str] = []
+        for item in entries:
+            if item.startswith("*"):
+                self.suffixes.append(item[1:])
+            elif item.endswith("*"):
+                self.prefixes.append(item[:-1])
+            else:
+                self.exact.add(item)
+
+    def __bool__(self) -> bool:
+        return bool(self.exact or self.prefixes or self.suffixes)
+
+    def matches(self, name: str) -> bool:
+        if name in self.exact:
+            return True
+        if any(name.startswith(p) for p in self.prefixes):
+            return True
+        return any(name.endswith(s) for s in self.suffixes)
+
+
+def parse_zone(
+    zone: dns.zone.Zone,
+    check_policy: set[str],
+    exclude_owner: set[str],
+    exclude_rdata: set[str],
+) -> dict[str, dict]:
+    """Walk the zone and return records to verify, grouped by qtype."""
+    zoneorigin = zone.origin.to_text().lower()
+    nodot_zoneorigin = zoneorigin[:-1]
+    logger.debug("zone origin %s", zoneorigin)
+
+    owner_matcher = ExcludeMatcher(exclude_owner)
+    rdata_matcher = ExcludeMatcher(exclude_rdata)
+
+    ns_dict: dict[str, list[str]] = {}
+    cname_dict: dict[str, list[str]] = {}
+    mx_dict: dict[str, list[str]] = {}
+    srv_dict: dict[str, list[str]] = {}
+    dname_dict: dict[str, list[str]] = {}
+    nodot_dict: dict[str, str] = {}
+
     try:
-        zoneorigin = z.origin.to_text().lower()
-        nodot_zoneorigin = zoneorigin[:-1]
-        ns_dict = {}
-        cname_dict = {}
-        mx_dict = {}
-        srv_dict = {}
-        dname_dict = {}
-        nodot_dict = {}
-
-        # split exclude list into a list of FQDN and wildcard (labels) to exclude
-        exclude_fqdn = []
-        exclude_label = []
-        for item in exclude:
-            if item.endswith('*'):
-                exclude_label.append(item[:-1])
-            else:
-                exclude_fqdn.append(item)
-
-        logger.debug("zone origin " + zoneorigin)
-        # iterate through all rdatasets
-        for owner, node in z.nodes.items():
-            rdatasets = node.rdatasets
-
-            # make origin fully qualified
+        for owner, node in zone.nodes.items():
             if owner == dns.name.empty:
-                # hostnames are relative, zone apex is therefore empty in this case
                 origin = zoneorigin
+            elif zoneorigin.startswith("."):
+                origin = owner.to_text().lower() + zoneorigin
             else:
-                # do not add additional "." if we check the root zone
-                if not zoneorigin.startswith("."):
-                    origin = owner.to_text().lower() + "." + zoneorigin
-                else:
-                    origin = owner.to_text().lower() + zoneorigin
+                origin = f"{owner.to_text().lower()}.{zoneorigin}"
 
-            # ignore any RRset whose owner name matches an entry from the exclude list
-            skip = False
-            if origin in exclude_fqdn:
-                skip = True
-            for label in exclude_label:
-                if origin.startswith(label):
-                    skip = True
-                    continue
-            if skip:
-                # RRset is skipped
+            if owner_matcher.matches(origin):
                 continue
 
-            # check if (relative) owner name ends with the zone origin. This means
-            # that the user forgot to add a dot (.) at the end.
-            if not zoneorigin.startswith(".") and check_policy['NODOT']:
-                if owner.to_text().endswith(nodot_zoneorigin):
-                    nodot_dict[origin] = owner.to_text()
+            # Owner ending in the bare zone origin (no trailing dot) usually
+            # means the user wrote an FQDN but forgot the final dot.
+            if (
+                "NODOT" in check_policy
+                and not zoneorigin.startswith(".")
+                and owner.to_text().endswith(nodot_zoneorigin)
+            ):
+                nodot_dict[origin] = owner.to_text()
 
-            for rdataset in rdatasets:
-                # zone is read with relative names. Any name with a dot at
-                # the end is an out-of-bailiwick name and needs to be checked.
-                # If the qtype is NS we compare parent and child NS set.
+            for rdataset in node.rdatasets:
+                rdtype = rdataset.rdtype
 
-                if rdataset.rdtype == dns.rdatatype.NS and check_policy['NS']:
-                    ns_target_list = []
-                    for rrset in rdataset.items:
-                        ns_target_hostname = rrset.target.to_text().lower()
-                        if not ns_target_hostname.endswith("."):
-                            if zoneorigin == ".":
-                                ns_target_hostname += zoneorigin
-                            else:
-                                ns_target_hostname +=  "." + zoneorigin
-                        ns_target_list.append( ns_target_hostname )
-                    ns_dict[origin] = ns_target_list
+                if rdtype == dns.rdatatype.NS and "NS" in check_policy:
+                    targets = [
+                        _qualify(rr.target.to_text().lower(), zoneorigin)
+                        for rr in rdataset.items
+                    ]
+                    targets = [t for t in targets if not rdata_matcher.matches(t)]
+                    if targets:
+                        ns_dict[origin] = targets
 
-                if rdataset.rdtype == dns.rdatatype.CNAME  and check_policy['CNAME']:
-                    for rrset in rdataset.items:
-                        cname_target_hostname = rrset.target.to_text().lower()
-                        if not cname_target_hostname.endswith("."):
-                            if not z.get_node(cname_target_hostname) is None:
+                elif rdtype == dns.rdatatype.CNAME and "CNAME" in check_policy:
+                    for rr in rdataset.items:
+                        target = rr.target.to_text().lower()
+                        if not target.endswith("."):
+                            if zone.get_node(target) is not None:
                                 continue
-                            else:
-                                cname_target_hostname += "." + zoneorigin
-                        cname_dict[origin] = [cname_target_hostname]
+                            target = f"{target}.{zoneorigin}"
+                        if rdata_matcher.matches(target):
+                            continue
+                        cname_dict[origin] = [target]
 
-                if rdataset.rdtype == dns.rdatatype.MX and check_policy['MX']:
-                    mx_exchange_list = []
-                    for rrset in rdataset.items:
-                        mx_exchange_hostname = rrset.exchange.to_text().lower()
-                        if not mx_exchange_hostname.endswith("."):
-                            if not z.get_node(mx_exchange_hostname) is None:
+                elif rdtype == dns.rdatatype.MX and "MX" in check_policy:
+                    targets = []
+                    for rr in rdataset.items:
+                        target = rr.exchange.to_text().lower()
+                        if not target.endswith("."):
+                            if zone.get_node(target) is not None:
                                 continue
-                            else:
-                                mx_exchange_hostname  += "." + zoneorigin
-                        mx_exchange_list.append( mx_exchange_hostname )
-                    mx_dict[origin] = mx_exchange_list
+                            target = f"{target}.{zoneorigin}"
+                        if rdata_matcher.matches(target):
+                            continue
+                        targets.append(target)
+                    if targets:
+                        mx_dict[origin] = targets
 
-                if rdataset.rdtype == dns.rdatatype.SRV and check_policy['SRV']:
-                    srv_target_list = []
-                    for rrset in rdataset.items:
-                        srv_target_hostname = rrset.target.to_text().lower()
-                        if not srv_target_hostname.endswith("."):
-                            if not z.get_node(srv_target_hostname) is None:
+                elif rdtype == dns.rdatatype.SRV and "SRV" in check_policy:
+                    targets = []
+                    for rr in rdataset.items:
+                        target = rr.target.to_text().lower()
+                        if not target.endswith("."):
+                            if zone.get_node(target) is not None:
                                 continue
-                            else:
-                                srv_target_hostname += "." + zoneorigin
-                        srv_target_list.append( srv_target_hostname )
-                    srv_dict[origin] = srv_target_list
+                            target = f"{target}.{zoneorigin}"
+                        if rdata_matcher.matches(target):
+                            continue
+                        targets.append(target)
+                    if targets:
+                        srv_dict[origin] = targets
 
-                if rdataset.rdtype == dns.rdatatype.DNAME and check_policy['DNAME']:
-                    for rrset in rdataset.items:
-                        dname_target_hostname = rrset.target.to_text().lower()
-                        if not dname_target_hostname.endswith("."):
-                            if not z.get_node(dname_target_hostname) is None:
+                elif rdtype == dns.rdatatype.DNAME and "DNAME" in check_policy:
+                    for rr in rdataset.items:
+                        target = rr.target.to_text().lower()
+                        if not target.endswith("."):
+                            if zone.get_node(target) is not None:
                                 continue
-                            else:
-                                dname_target_hostname += "." + zoneorigin
-                        dname_dict[origin] = [dname_target_hostname]
+                            target = f"{target}.{zoneorigin}"
+                        if rdata_matcher.matches(target):
+                            continue
+                        dname_dict[origin] = [target]
+    except dns.exception.FormError as exc:
+        raise RuntimeError("Parsing the zone failed. Check your zone records") from exc
 
-    except dns.exception.FormError:
-        raise Exception("Parsing the zone failed. Check your zone records")
+    return {
+        "NS": ns_dict,
+        "CNAME": cname_dict,
+        "MX": mx_dict,
+        "SRV": srv_dict,
+        "DNAME": dname_dict,
+        "NODOT": nodot_dict,
+    }
 
-    zoneparsed = {'NS':ns_dict, 'CNAME':cname_dict, 'MX':mx_dict, \
-                  'SRV':srv_dict, 'DNAME':dname_dict, 'NODOT':nodot_dict}
 
-    return zoneparsed
-
-
-def check_zone(zoneparsed, zoneorigin, timeout):
-    """ Checks all records in the dictionary given in the argument.
-        Prints resolve errors to stdout. """
-    # set up resolver
-    myresolver = None
-    if resolver == None:
-        # we use default system resolver
-        myresolver = dns.resolver.Resolver(configure=True)
+def build_resolver(resolver_address: str | None, timeout: float) -> dns.asyncresolver.Resolver:
+    if resolver_address is None:
+        myresolver = dns.asyncresolver.Resolver(configure=True)
     else:
-        myresolver = dns.resolver.Resolver(configure=False)
-        myresolver.nameservers = [resolver]
+        myresolver = dns.asyncresolver.Resolver(configure=False)
+        myresolver.nameservers = [resolver_address]
     myresolver.timeout = timeout
-    # zoneorigin needed to identify NS apex set and find
-    # parent zone
-    if not zoneorigin.endswith("."):
-        zoneorigin = zoneorigin + "."
-
-    result_dict = zoneparsed.get("NODOT")
-    for owner, owner_relative in iter(result_dict.items()):
-        print("No final dot in hostname %s leads to expansion %s" % (owner_relative, owner))
-
-    result_dict = zoneparsed.get("NS")
-    for owner, ns_zone in iter(result_dict.items()):
-        try:
-            status = None
-            # Zone apex NS rrset needs different checks. We cannot ask resolver
-            # for NS rrset as this would return zone apex NS rrset again.
-            if owner == zoneorigin:
-                ns_parent = get_parent_ns_set(myresolver, zoneorigin, timeout)
-                # ns_parent is empty for the root zone or if authoritative
-                # name servers could not be contacted directly. In these cases
-                # we skip the zone apex NS rrset check silently.
-                if not ns_parent:
-                    logger.debug("Zone apex NS rrset check skipped")
-                    ns_parent = ns_zone
-                ns_child_missing = set(ns_parent) - set(ns_zone)
-                ns_parent_missing = set(ns_zone) - set(ns_parent)
-            else:
-                ns_child = resolve_name(myresolver, owner, "NS")
-                ns_child_missing = set(ns_zone) - set(ns_child)
-                ns_parent_missing = set(ns_child) - set(ns_zone)
-        except dns.exception.Timeout:
-            # Return SERVFAIL for failed attempts to query names.
-            status = "servfail"
-        except dns.resolver.NXDOMAIN:
-            # We expect that the queried resolvers follows RFC 6604
-            # and returns NXDOMAIN if the final hostname of a CNAME
-            # or DNAME redirection is NXDOMAIN.
-            # Rumor has it that there are some resolvers which don't
-            # behave like this.
-            status = "nxdomain"
-        except dns.resolver.NoNameservers:
-            status = "no nameserver reachable (timeout)"
-
-        if status != None:
-            print("Resolution of delegation %s failed: %s" % (owner, status))
-        else:
-            if len(ns_parent_missing) > 0:
-                for nameserver in ns_parent_missing:
-                    print("Referral mismatch for %s: NS missing in parent %s" % (owner, nameserver))
-            if len(ns_child_missing) > 0:
-                for nameserver in ns_child_missing:
-                    print("Referral mismatch for %s: NS missing in child %s" % (owner, nameserver))
-
-    for qtype in ["CNAME", "MX", "SRV", "DNAME"]:
-        result_dict = zoneparsed.get(qtype)
-        for owner, rdataList in iter(result_dict.items()):
-            for rdata in rdataList:
-                try:
-                    status = None
-                    # We don't know which qtype exist for the target hostname.
-                    # NoAnswer is not treated as an error.
-                    answers = resolve_name(myresolver, rdata, "A")
-                except dns.exception.Timeout:
-                    # Return SERVFAIL for failed attempts to query names.
-                    status = "servfail"
-                except dns.resolver.YXDOMAIN:
-                    # We don't know if any target hostname lookup
-                    # requires DNAME processing by the resolver and
-                    # may overflow legal size of domain names.
-                    status = "yxdomain"
-                except dns.resolver.NXDOMAIN:
-                    status = "nxdomain"
-                except dns.resolver.NoNameservers:
-                    status = "timeout"
-
-                if status != None:
-                    print("Resolution of %s %s target %s failed: %s" \
-                        % (qtype, owner, rdata, status))
+    myresolver.lifetime = timeout
+    return myresolver
 
 
-def resolve_name(resolver, qname, qtype):
-    """ Resolves qname, qtype.
-        Returns list of nameservers for qtype NS
-        and empty list for any other qtype.
-        Resolver exceptions are forwarded. """
-    result = []
-    logger.debug("resolve " + qname + " " + qtype)
-    # No answer is no error case. It can mean we tried with the wrong qtype
-    answers = resolver.resolve(qname, qtype, raise_on_no_answer=False)
-    if answers.rdtype == dns.rdatatype.NS and answers.rrset != None:
-        for rrset in answers:
-            result.append( rrset.target.to_text().lower() )
-    return result
+async def resolve_name(
+    resolver: dns.asyncresolver.Resolver, qname: str, qtype: str
+) -> list[str]:
+    """Resolve ``qname``/``qtype``; return NS targets for NS, else []."""
+    logger.debug("resolve %s %s", qname, qtype)
+    answers = await resolver.resolve(qname, qtype, raise_on_no_answer=False)
+    if answers.rdtype == dns.rdatatype.NS and answers.rrset is not None:
+        return [rr.target.to_text().lower() for rr in answers]
+    return []
 
 
-def get_parent_ns_set(resolver, origin, timeout):
-    """ Returns NS set of zone delegation in parent zone. """
-    # We could do a top-down or bottom-up approach to find the
-    # parent zone. We use the bottom-up approach because we assume
-    # that the parent zone is in most cases just one striped label
-    # from the original zone name.
-    #
-    # The algorithm for finding the parent zone NS rrset is as
-    # following:
-    #  1. strip one label from the left from the hostname
-    #  2. lookup name with qtype NS
-    #  3. if response contains answers we found the zone cut
-    #     - select name server from answer rrset
-    #     - query this name server for the child zones NS rrset
-    #     - return NS rrset from answer/additional section
-    #     else continue at 1.
+async def get_parent_ns_set(
+    resolver: dns.asyncresolver.Resolver, origin: str, timeout: float
+) -> list[str]:
+    """Return the NS rrset of ``origin``'s delegation in the parent zone.
 
+    Walks up label-by-label until an NS lookup succeeds (the zone cut), then
+    queries one of those name servers directly for the child's NS rrset.
+    Returns [] if the parent cannot be located (e.g. root zone, or direct
+    DNS to authorities is blocked).
+    """
     name = origin
-    ns_set = []
-    logger.debug("attempt to find parent zone of " + name)
-    while name.count('.') > 1:
-        label, sep, zone = name.partition('.')
-        ns_set = resolve_name(resolver, zone, "NS")
+    ns_set: list[str] = []
+    logger.debug("attempt to find parent zone of %s", name)
+    while name.count(".") > 1:
+        _, _, zone = name.partition(".")
+        try:
+            ns_set = await resolve_name(resolver, zone, "NS")
+        except dns.exception.DNSException:
+            ns_set = []
         name = zone
         if ns_set:
-            # we found the zone cut
             break
 
-    logger.debug("found parent zone at " + name)
+    logger.debug("found parent zone at %s", name)
 
-    # find name server address
     request = dns.message.make_query(origin, dns.rdatatype.NS)
     query_error = 0
-    has_answer = False
+    response = None
     for nameserver in ns_set:
         try:
-            logger.debug("lookup parent nameserver address " + nameserver)
-            answers = resolver.resolve(nameserver, "A", raise_on_no_answer=False)
-            for rrset in answers:
-                address = rrset.address
-                logger.debug("asking parent nameserver at address " + address)
-                response = dns.query.udp(request, address, timeout=timeout)
-                res_auth = response.authority
-                res_ans = response.answer
-                if res_auth or res_ans:
-                    # If the parent zone is also authoritative for the child zone
-                    # we will get an answer section instead of an authority section
-                    # so either case is valid.
-                    # If we rely on the answer section, the check is meaningless
-                    # as the response contains the NS rrset we already know.
-                    has_answer = True
+            logger.debug("lookup parent nameserver address %s", nameserver)
+            answers = await resolver.resolve(nameserver, "A", raise_on_no_answer=False)
+            for rr in answers:
+                address = rr.address
+                logger.debug("asking parent nameserver at address %s", address)
+                response = await dns.asyncquery.udp(request, address, timeout=timeout)
+                if response.authority or response.answer:
                     break
             else:
                 continue
             break
-        except Exception as e:
+        except Exception as exc:
             query_error += 1
-            logger.debug("error on nameserver lookup: " + str(e))
-            # We skip the zone apex NS check if multiple queries fail
-            # (likely causes by a policy restricting direct DNS access
-            #  to the Internet)
-            if query_error > 3:
+            logger.debug("error on nameserver lookup: %s", exc)
+            if query_error > PARENT_NS_QUERY_ERROR_BUDGET:
                 break
 
-    ns_parent = []
-    # if we cannot find the NS records for the parent zone
-    # we return an empty list, this will result in errors for the root zone
-    if has_answer is False:
-        return ns_parent
-    for rrset in res_auth:
-        if rrset.rdtype == dns.rdatatype.NS:
-            for rr in rrset.items:
-                ns_parent.append( rr.target.to_text().lower() )
-    for rrset in res_ans:
-        if rrset.rdtype == dns.rdatatype.NS:
-            for rr in rrset.items:
-                ns_parent.append( rr.target.to_text().lower() )
+    if response is None or not (response.authority or response.answer):
+        return []
 
+    ns_parent: list[str] = []
+    for rrset in (*response.authority, *response.answer):
+        if rrset.rdtype == dns.rdatatype.NS:
+            ns_parent.extend(rr.target.to_text().lower() for rr in rrset.items)
     return ns_parent
 
 
+async def _check_ns(
+    sem: asyncio.Semaphore,
+    resolver: dns.asyncresolver.Resolver,
+    owner: str,
+    ns_zone: list[str],
+    zoneorigin: str,
+    timeout: float,
+) -> tuple:
+    async with sem:
+        try:
+            if owner == zoneorigin:
+                ns_parent = await get_parent_ns_set(resolver, zoneorigin, timeout)
+                # Empty list signals root zone or unreachable authorities;
+                # silently skip the apex NS rrset comparison in that case.
+                if not ns_parent:
+                    logger.debug("Zone apex NS rrset check skipped")
+                    ns_parent = ns_zone
+                child_missing = set(ns_parent) - set(ns_zone)
+                parent_missing = set(ns_zone) - set(ns_parent)
+            else:
+                ns_child = await resolve_name(resolver, owner, "NS")
+                child_missing = set(ns_zone) - set(ns_child)
+                parent_missing = set(ns_child) - set(ns_zone)
+        except dns.exception.Timeout:
+            return ("ns_fail", owner, "servfail")
+        except dns.resolver.NXDOMAIN:
+            # Per RFC 6604, resolvers should return NXDOMAIN when the final
+            # name in a CNAME/DNAME chain is NXDOMAIN; some don't.
+            return ("ns_fail", owner, "nxdomain")
+        except dns.resolver.NoNameservers:
+            return ("ns_fail", owner, "no nameserver reachable (timeout)")
+        return ("ns_diff", owner, sorted(parent_missing), sorted(child_missing))
+
+
+async def _check_target(
+    sem: asyncio.Semaphore,
+    resolver: dns.asyncresolver.Resolver,
+    qtype: str,
+    owner: str,
+    rdata: str,
+) -> tuple | None:
+    async with sem:
+        try:
+            # qtype A is an arbitrary probe; NoAnswer is fine because we do
+            # not know which qtypes the target actually holds.
+            await resolve_name(resolver, rdata, "A")
+        except dns.exception.Timeout:
+            return (qtype, owner, rdata, "servfail")
+        except dns.resolver.YXDOMAIN:
+            # DNAME expansion at the resolver may push the name past the
+            # legal DNS name length.
+            return (qtype, owner, rdata, "yxdomain")
+        except dns.resolver.NXDOMAIN:
+            return (qtype, owner, rdata, "nxdomain")
+        except dns.resolver.NoNameservers:
+            return (qtype, owner, rdata, "timeout")
+    return None
+
+
+async def check_zone(
+    zoneparsed: dict[str, dict],
+    zoneorigin: str,
+    resolver: dns.asyncresolver.Resolver,
+    timeout: float,
+    concurrency: int,
+) -> None:
+    """Verify all collected records concurrently and print issues to stdout."""
+    if not zoneorigin.endswith("."):
+        zoneorigin = zoneorigin + "."
+
+    sem = asyncio.Semaphore(concurrency)
+
+    for owner, owner_relative in sorted(zoneparsed["NODOT"].items()):
+        print(f"No final dot in hostname {owner_relative} leads to expansion {owner}")
+
+    ns_tasks = [
+        _check_ns(sem, resolver, owner, ns_zone, zoneorigin, timeout)
+        for owner, ns_zone in zoneparsed["NS"].items()
+    ]
+    target_tasks = [
+        _check_target(sem, resolver, qtype, owner, rdata)
+        for qtype in ("CNAME", "MX", "SRV", "DNAME")
+        for owner, rdata_list in zoneparsed[qtype].items()
+        for rdata in rdata_list
+    ]
+
+    logger.debug("dispatching %d NS checks and %d target checks (concurrency=%d)",
+                 len(ns_tasks), len(target_tasks), concurrency)
+
+    ns_results, target_results = await asyncio.gather(
+        asyncio.gather(*ns_tasks),
+        asyncio.gather(*target_tasks),
+    )
+
+    for result in sorted(ns_results, key=lambda r: r[1]):
+        if result[0] == "ns_fail":
+            _, owner, status = result
+            print(f"Resolution of delegation {owner} failed: {status}")
+        else:
+            _, owner, parent_missing, child_missing = result
+            for ns in parent_missing:
+                print(f"Referral mismatch for {owner}: NS missing in parent {ns}")
+            for ns in child_missing:
+                print(f"Referral mismatch for {owner}: NS missing in child {ns}")
+
+    for result in sorted(r for r in target_results if r is not None):
+        qtype, owner, rdata, status = result
+        print(f"Resolution of {qtype} {owner} target {rdata} failed: {status}")
+
+
+def parse_policy(value: str) -> set[str]:
+    items = [v.strip().upper() for v in value.split(",") if v.strip()]
+    invalid = [v for v in items if v not in CHECK_TYPES]
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            f"invalid policy value(s): {','.join(invalid)} "
+            f"(allowed: {','.join(CHECK_TYPES)})"
+        )
+    return set(items)
+
+
+def parse_exclude(value: str) -> set[str]:
+    return {v.strip().lower() for v in value.split(",") if v.strip()}
+
+
+def existing_file(value: str) -> Path:
+    path = Path(value)
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"file not found or not readable: {value}")
+    return path
+
+
+def positive_int(value: str) -> int:
+    try:
+        n = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not an integer: {value}") from exc
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1: {value}")
+    return n
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="hostname-check",
+        description=__doc__.strip().splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("-o", "--origin", required=True, help="zone origin (e.g. switch.ch)")
+
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("-n", "--nameserver", help="get zone via AXFR from this nameserver IP")
+    source.add_argument("-i", "--zonefile", type=existing_file, help="read zone from file (BIND format)")
+
+    parser.add_argument("-r", "--resolver", help="recursive resolver IP (default: system)")
+    parser.add_argument("-k", "--keyfile", type=existing_file, help="TSIG key file for AXFR")
+    parser.add_argument(
+        "-x", "--policy",
+        type=parse_policy,
+        default=set(CHECK_TYPES),
+        help=f"comma-separated checks to run (default: {','.join(CHECK_TYPES)})",
+    )
+    parser.add_argument(
+        "-e", "--exclude",
+        type=parse_exclude,
+        default=set(),
+        help="comma-separated owner names to skip; '*' is a wildcard at the start "
+             "or end of an entry (e.g. 'foo.*' or '*.example.')",
+    )
+    parser.add_argument(
+        "-E", "--exclude-rdata",
+        type=parse_exclude,
+        default=set(),
+        help="comma-separated rdata target names to skip; same wildcard syntax as --exclude",
+    )
+    parser.add_argument(
+        "-t", "--timeout", type=float, default=DEFAULT_TIMEOUT,
+        help=f"DNS query timeout in seconds (default: {DEFAULT_TIMEOUT})",
+    )
+    parser.add_argument(
+        "-c", "--concurrency", type=positive_int, default=DEFAULT_CONCURRENCY,
+        help=f"max concurrent DNS lookups (default: {DEFAULT_CONCURRENCY})",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="verbose output (debug)")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
+
+    try:
+        if args.nameserver is not None:
+            keyring = read_tsigkey(args.keyfile) if args.keyfile else None
+            zonedata = zone_transfer(args.nameserver, args.origin, keyring)
+        else:
+            zonedata = read_zonefile(args.zonefile, args.origin)
+
+        zoneparsed = parse_zone(zonedata, args.policy, args.exclude, args.exclude_rdata)
+        resolver = build_resolver(args.resolver, args.timeout)
+        asyncio.run(
+            check_zone(zoneparsed, args.origin, resolver, args.timeout, args.concurrency)
+        )
+    except Exception as exc:
+        if args.verbose:
+            logger.exception("aborted")
+        else:
+            print(f"Error: {exc}, aborted!", file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    try:
-        opts, args = getopt.getopt(sys.argv[1:], "hvx:n:o:r:k:i:e:t:", \
-        ["help", "verbose", "policy", "origin", "nameserver", "resolver", "keyfile", "zonefile", "exclude", "timeout"])
-    except getopt.GetoptError as err:
-        # print help information and exit:
-        print(err) # will print something like "option -a not recognized"
-        usage()
-        sys.exit(2)
-
-    verbose = False
-    zoneorigin = None
-    nameserver = None
-    resolver = None
-    keyfile = None
-    zonefile = None
-    exclude = set()
-    timeout = 3.0
-    # Do all checks by default
-    check_policy = {"NS":True, "MX":True, "CNAME":True, "SRV":True, "DNAME":True, "NODOT":True}
-
-    for o, value in opts:
-        if o in ("-v", "--verbose"):
-            verbose = True
-        elif o in ("-o", "--origin"):
-            zoneorigin = value
-        elif o in ("-x", "--policy"):
-            # If policy argument is used, we only check qtypes
-            # specified in argument. Therefore, default False
-            check_policy = {"NS":False, "MX":False, "CNAME":False, "SRV":False, "DNAME":False, "NODOT":False}
-            values = value.split(",")
-            for item in values:
-                if item in check_policy:
-                    check_policy[item] = True
-                else:
-                    print("Error: -x invalid policy. '" + item \
-                          + "' is not a valid qtype policy")
-                    sys.exit()
-        elif o in ("-e", "--exclude"):
-            values = value.split(",")
-            for item in values:
-                exclude.add(item.lower())
-        elif o in ("-n", "--nameserver"):
-            nameserver = value
-        elif o in ("-r", "--resolver"):
-            resolver = value
-        elif o in ("-k", "--keyfile"):
-            keyfile = value
-            if not os.access(keyfile, os.R_OK):
-                print("Error: keyfile not found or not readable")
-                sys.exit()
-        elif o in ("-i", "--zonefile"):
-            zonefile = value
-            if not os.access(zonefile, os.R_OK):
-                print("Error: zonefile not found or not readable")
-                sys.exit()
-        elif o in ("-t", "--timeout"):
-            timeout = float(value)
-        elif o in ("-h", "--help"):
-            usage()
-            sys.exit()
-
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger()
-
-    try:
-        # get zone via zone transfer
-        if (zoneorigin != None and nameserver != None):
-            keyring = None
-            if keyfile != None:
-                keyring = read_tsigkey(keyfile)
-            zonedata = zone_transfer(nameserver, zoneorigin, keyring)
-        # get zone from file
-        elif zonefile != None:
-            zonedata = read_zonefile(zonefile, zoneorigin)
-        else:
-            usage()
-            sys.exit()
-
-        # collect zone records to verify
-        zoneparsed = parse_zone(zonedata, check_policy, exclude)
-        # resolve records and print issues
-        check_zone(zoneparsed, zoneorigin, timeout)
-
-    except Exception as e:
-        if verbose:
-            traceback.print_exc()
-        else:
-            print("Error: {0}, aborted!".format(e))
-            sys.exit(1)
-
+    sys.exit(main())
