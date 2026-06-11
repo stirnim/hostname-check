@@ -32,7 +32,7 @@ Lookups are issued concurrently against the configured recursive resolver
 against authoritative name servers. Apex NS checks are skipped silently
 if authoritative servers cannot be reached.
 
-Requires Python >= 3.11 and dnspython >= 2.0.
+Requires Python >= 3.9 and dnspython >= 2.0.
 """
 
 from __future__ import annotations

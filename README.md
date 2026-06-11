@@ -14,14 +14,13 @@ DNS is blocked).
 
 ## Requirements
 
- * [Python](https://www.python.org/) >= 3.11
+ * [Python](https://www.python.org/) >= 3.9
  * [dnspython](https://www.dnspython.org/) >= 2.0
 
-Install dnspython into a virtualenv:
+Install the dependencies, ideally into a virtualenv:
 
 ```sh
-python3 -m venv ~/venv/hostname
-~/venv/hostname/bin/pip install dnspython
+pip install -r requirements.txt
 ```
 
 ## Usage
