@@ -21,11 +21,15 @@
 # SOFTWARE.
 
 """
-Check resource records of a zone for out-of-bailiwick hostnames.
+Find dangling and mistyped hostname references in a DNS zone.
 
 The script verifies that NS/CNAME/MX/SRV/DNAME/SVCB/HTTPS targets resolve,
-that the parent and child NS rrsets agree at the apex, and flags a common
-typo where a fully-qualified hostname is missing its trailing dot.
+that the parent and child NS rrsets agree at the apex, and that the domain
+names embedded in SPF (TXT v=spf1) and CAA records resolve. It also flags a
+common typo where a fully-qualified hostname is missing its trailing dot.
+Names inside the zone itself are skipped; the focus is references that leave
+the zone, where a target that no longer resolves is a hijacking risk because
+whoever can claim it can take over the traffic or trust the zone sends there.
 
 Lookups are issued concurrently against the configured recursive resolver
 (via dnspython's async interface) and, for the apex NS check, directly
@@ -59,7 +63,7 @@ import dns.tsigkeyring
 import dns.zone
 
 CHECK_TYPES: tuple[str, ...] = (
-    "NS", "MX", "CNAME", "SRV", "DNAME", "SVCB", "HTTPS", "NODOT"
+    "NS", "MX", "CNAME", "SRV", "DNAME", "SVCB", "HTTPS", "SPF", "CAA", "NODOT"
 )
 DEFAULT_TIMEOUT = 3.0
 DEFAULT_CONCURRENCY = 32
@@ -201,6 +205,115 @@ def _collect_svcb_targets(
     return targets
 
 
+def _spf_term_domain(term: str) -> str | None:
+    """Return the resolvable domain-spec of one SPF term, or None.
+
+    None means the term carries no name we can statically resolve: ``all``,
+    ``ip4:``/``ip6:``, a bare ``a``/``mx`` (which mean the record owner),
+    ``ptr``, ``exp=``, an unknown term, or any domain-spec containing an SPF
+    macro (``%{...}``) that only expands at evaluation time.
+    """
+    # Mechanisms may carry a qualifier (+ - ~ ?); modifiers (redirect=, exp=)
+    # never do, and start with a letter, so stripping is always safe.
+    if term[:1] in "+-~?":
+        term = term[1:]
+    lower = term.lower()
+    if lower.startswith("include:"):
+        spec = term[len("include:"):]
+    elif lower.startswith("redirect="):
+        spec = term[len("redirect="):]
+    elif lower.startswith("exists:"):
+        spec = term[len("exists:"):]
+    elif lower.startswith("a:"):
+        spec = term[len("a:"):]
+    elif lower.startswith("mx:"):
+        spec = term[len("mx:"):]
+    else:
+        return None
+    # Drop any dual-CIDR length suffix, e.g. a:mail.example.net/24//64.
+    spec = spec.split("/", 1)[0]
+    if not spec or "%" in spec:
+        return None
+    return spec
+
+
+def _name_in_zone(fqdn: str, zone: dns.zone.Zone, zoneorigin: str) -> bool:
+    """True if absolute, lowercased ``fqdn`` is a node within this zone."""
+    if fqdn == zoneorigin:
+        return True
+    suffix = zoneorigin if zoneorigin.startswith(".") else "." + zoneorigin
+    if fqdn.endswith(suffix):
+        relative = fqdn[: -len(suffix)]
+        return bool(relative) and zone.get_node(relative) is not None
+    return False
+
+
+def _extract_spf_targets(
+    rdataset: dns.rdataset.Rdataset,
+    zone: dns.zone.Zone,
+    zoneorigin: str,
+    rdata_matcher: ExcludeMatcher,
+) -> list[str]:
+    """Return resolvable domain names referenced by SPF (``v=spf1``) TXT records.
+
+    Pulls the domain-spec out of ``include:``, ``redirect=``, ``a:``, ``mx:``
+    and ``exists:`` terms. Unlike NS/MX/SVCB targets, an SPF domain-spec is a
+    literal string and is always a global FQDN -- it is never relative to the
+    zone origin -- so it is checked verbatim, not qualified. In-zone names are
+    skipped as in-bailiwick; duplicates within a record are collapsed.
+    """
+    targets: list[str] = []
+    for rr in rdataset.items:
+        text = b"".join(rr.strings).decode("ascii", "replace")
+        tokens = text.split()
+        if not tokens or tokens[0].lower() != "v=spf1":
+            continue
+        for term in tokens[1:]:
+            domain = _spf_term_domain(term)
+            if domain is None:
+                continue
+            fqdn = (domain if domain.endswith(".") else domain + ".").lower()
+            if _name_in_zone(fqdn, zone, zoneorigin):
+                continue
+            if rdata_matcher.matches(fqdn):
+                continue
+            targets.append(fqdn)
+    # Collapse duplicate references (e.g. two includes of the same name).
+    return list(dict.fromkeys(targets))
+
+
+def _extract_caa_targets(
+    rdataset: dns.rdataset.Rdataset,
+    zone: dns.zone.Zone,
+    zoneorigin: str,
+    rdata_matcher: ExcludeMatcher,
+) -> list[str]:
+    """Return CA domain names referenced by ``issue``/``issuewild`` CAA records.
+
+    The ``iodef`` tag holds a URL (mailto:/https:), and an empty issue value
+    means "no CA may issue" -- neither carries a resolvable host, so both are
+    skipped. Per RFC 8659 the value is ``<domain>[; parameter=value ...]``; the
+    CA domain is a global FQDN and is checked verbatim, like an SPF domain-spec,
+    not qualified to the zone origin. In-zone names are skipped as in-bailiwick.
+    """
+    targets: list[str] = []
+    for rr in rdataset.items:
+        if rr.tag.decode("ascii", "replace").lower() not in ("issue", "issuewild"):
+            continue
+        value = rr.value.decode("ascii", "replace")
+        # Take the CA domain that precedes any "; parameter=value" suffix.
+        domain = value.split(";", 1)[0].strip()
+        if not domain:
+            continue
+        fqdn = (domain if domain.endswith(".") else domain + ".").lower()
+        if _name_in_zone(fqdn, zone, zoneorigin):
+            continue
+        if rdata_matcher.matches(fqdn):
+            continue
+        targets.append(fqdn)
+    return list(dict.fromkeys(targets))
+
+
 def parse_zone(
     zone: dns.zone.Zone,
     check_policy: set[str],
@@ -222,6 +335,8 @@ def parse_zone(
     dname_dict: dict[str, list[str]] = {}
     svcb_dict: dict[str, list[str]] = {}
     https_dict: dict[str, list[str]] = {}
+    spf_dict: dict[str, list[str]] = {}
+    caa_dict: dict[str, list[str]] = {}
     nodot_dict: dict[str, str] = {}
 
     try:
@@ -320,6 +435,20 @@ def parse_zone(
                     )
                     if targets:
                         https_dict[origin] = targets
+
+                elif rdtype == dns.rdatatype.TXT and "SPF" in check_policy:
+                    targets = _extract_spf_targets(
+                        rdataset, zone, zoneorigin, rdata_matcher
+                    )
+                    if targets:
+                        spf_dict[origin] = targets
+
+                elif rdtype == dns.rdatatype.CAA and "CAA" in check_policy:
+                    targets = _extract_caa_targets(
+                        rdataset, zone, zoneorigin, rdata_matcher
+                    )
+                    if targets:
+                        caa_dict[origin] = targets
     except dns.exception.FormError as exc:
         raise RuntimeError("Parsing the zone failed. Check your zone records") from exc
 
@@ -331,6 +460,8 @@ def parse_zone(
         "DNAME": dname_dict,
         "SVCB": svcb_dict,
         "HTTPS": https_dict,
+        "SPF": spf_dict,
+        "CAA": caa_dict,
         "NODOT": nodot_dict,
     }
 
@@ -495,7 +626,7 @@ async def check_zone(
     ]
     target_tasks = [
         _check_target(sem, resolver, qtype, owner, rdata)
-        for qtype in ("CNAME", "MX", "SRV", "DNAME", "SVCB", "HTTPS")
+        for qtype in ("CNAME", "MX", "SRV", "DNAME", "SVCB", "HTTPS", "SPF", "CAA")
         for owner, rdata_list in zoneparsed[qtype].items()
         for rdata in rdata_list
     ]
