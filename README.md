@@ -1,9 +1,9 @@
 # hostname-check
 
 Checks resource records of a zone for out-of-bailiwick hostnames. For each
-NS, CNAME, MX, SRV and DNAME record it verifies that the target resolves;
-for the zone apex it also compares the parent and child NS rrsets and
-flags mismatches. A common typo where a fully-qualified hostname is
+NS, CNAME, MX, SRV, DNAME, SVCB and HTTPS record it verifies that the target
+resolves; for the zone apex it also compares the parent and child NS rrsets
+and flags mismatches. A common typo where a fully-qualified hostname is
 missing its trailing dot is reported as well.
 
 Lookups are issued concurrently (via dnspython's async interface) to
@@ -36,7 +36,7 @@ OPTIONS:
   -r, --resolver ADDRESS    recursive resolver IP (default: system)
   -k, --keyfile FILE        TSIG key file for AXFR
   -x, --policy LIST         comma-separated checks to run
-                            (default: NS,MX,CNAME,SRV,DNAME,NODOT)
+                            (default: NS,MX,CNAME,SRV,DNAME,SVCB,HTTPS,NODOT)
   -e, --exclude LIST        comma-separated owner names to skip;
                             '*' is a wildcard at the start or end
                             of an entry (e.g. 'foo.*' or '*.example.')
@@ -44,7 +44,8 @@ OPTIONS:
                             same wildcard syntax as --exclude
   -t, --timeout SECONDS     DNS query timeout (default: 3.0)
   -c, --concurrency N       max concurrent DNS lookups (default: 32)
-  -v, --verbose             verbose output (debug)
+  -v, --verbose             verbose debug output, including each DNS name
+                            as it is looked up
   -h, --help                show help and exit
 ```
 

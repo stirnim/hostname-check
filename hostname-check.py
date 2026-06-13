@@ -23,9 +23,9 @@
 """
 Check resource records of a zone for out-of-bailiwick hostnames.
 
-The script verifies that NS/CNAME/MX/SRV/DNAME targets resolve, that the
-parent and child NS rrsets agree at the apex, and flags a common typo
-where a fully-qualified hostname is missing its trailing dot.
+The script verifies that NS/CNAME/MX/SRV/DNAME/SVCB/HTTPS targets resolve,
+that the parent and child NS rrsets agree at the apex, and flags a common
+typo where a fully-qualified hostname is missing its trailing dot.
 
 Lookups are issued concurrently against the configured recursive resolver
 (via dnspython's async interface) and, for the apex NS check, directly
@@ -51,13 +51,16 @@ import dns.exception
 import dns.message
 import dns.name
 import dns.query
+import dns.rdataset
 import dns.rdatatype
 import dns.resolver
 import dns.tsig
 import dns.tsigkeyring
 import dns.zone
 
-CHECK_TYPES: tuple[str, ...] = ("NS", "MX", "CNAME", "SRV", "DNAME", "NODOT")
+CHECK_TYPES: tuple[str, ...] = (
+    "NS", "MX", "CNAME", "SRV", "DNAME", "SVCB", "HTTPS", "NODOT"
+)
 DEFAULT_TIMEOUT = 3.0
 DEFAULT_CONCURRENCY = 32
 PARENT_NS_QUERY_ERROR_BUDGET = 3
@@ -169,6 +172,35 @@ class ExcludeMatcher:
         return any(name.endswith(s) for s in self.suffixes)
 
 
+def _collect_svcb_targets(
+    rdataset: dns.rdataset.Rdataset,
+    zone: dns.zone.Zone,
+    zoneorigin: str,
+    rdata_matcher: ExcludeMatcher,
+) -> list[str]:
+    """Return the resolvable TargetNames of an SVCB/HTTPS rrset.
+
+    Per RFC 9460 a TargetName of "." is special and never points at an
+    out-of-bailiwick host: in AliasMode (SvcPriority 0) it means the service
+    does not exist, and in ServiceMode (SvcPriority > 0) the owner name is the
+    effective target. Both are skipped. Every other TargetName is a real
+    hostname and is collected for resolution exactly like an SRV target.
+    """
+    targets = []
+    for rr in rdataset.items:
+        if rr.target == dns.name.root:
+            continue
+        target = rr.target.to_text().lower()
+        if not target.endswith("."):
+            if zone.get_node(target) is not None:
+                continue
+            target = f"{target}.{zoneorigin}"
+        if rdata_matcher.matches(target):
+            continue
+        targets.append(target)
+    return targets
+
+
 def parse_zone(
     zone: dns.zone.Zone,
     check_policy: set[str],
@@ -188,6 +220,8 @@ def parse_zone(
     mx_dict: dict[str, list[str]] = {}
     srv_dict: dict[str, list[str]] = {}
     dname_dict: dict[str, list[str]] = {}
+    svcb_dict: dict[str, list[str]] = {}
+    https_dict: dict[str, list[str]] = {}
     nodot_dict: dict[str, str] = {}
 
     try:
@@ -272,6 +306,20 @@ def parse_zone(
                         if rdata_matcher.matches(target):
                             continue
                         dname_dict[origin] = [target]
+
+                elif rdtype == dns.rdatatype.SVCB and "SVCB" in check_policy:
+                    targets = _collect_svcb_targets(
+                        rdataset, zone, zoneorigin, rdata_matcher
+                    )
+                    if targets:
+                        svcb_dict[origin] = targets
+
+                elif rdtype == dns.rdatatype.HTTPS and "HTTPS" in check_policy:
+                    targets = _collect_svcb_targets(
+                        rdataset, zone, zoneorigin, rdata_matcher
+                    )
+                    if targets:
+                        https_dict[origin] = targets
     except dns.exception.FormError as exc:
         raise RuntimeError("Parsing the zone failed. Check your zone records") from exc
 
@@ -281,6 +329,8 @@ def parse_zone(
         "MX": mx_dict,
         "SRV": srv_dict,
         "DNAME": dname_dict,
+        "SVCB": svcb_dict,
+        "HTTPS": https_dict,
         "NODOT": nodot_dict,
     }
 
@@ -445,7 +495,7 @@ async def check_zone(
     ]
     target_tasks = [
         _check_target(sem, resolver, qtype, owner, rdata)
-        for qtype in ("CNAME", "MX", "SRV", "DNAME")
+        for qtype in ("CNAME", "MX", "SRV", "DNAME", "SVCB", "HTTPS")
         for owner, rdata_list in zoneparsed[qtype].items()
         for rdata in rdata_list
     ]
@@ -547,7 +597,10 @@ def build_parser() -> argparse.ArgumentParser:
         "-c", "--concurrency", type=positive_int, default=DEFAULT_CONCURRENCY,
         help=f"max concurrent DNS lookups (default: {DEFAULT_CONCURRENCY})",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="verbose output (debug)")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="verbose debug output, including each DNS name as it is looked up",
+    )
     return parser
 
 
