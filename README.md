@@ -12,8 +12,11 @@ It checks that:
 
  * **Record targets** resolve — the target of every NS, CNAME, MX, SRV,
    DNAME, SVCB and HTTPS record.
- * **Apex delegation** is consistent — the parent and child NS rrsets for the
-   zone apex agree (mismatches are flagged).
+ * **Delegations** are consistent — for every NS rrset in the zone, the
+   parent and child NS sets agree (mismatches are flagged). At the zone apex
+   the zone's NS rrset is compared against the parent zone's delegation; for
+   sub-delegations within the zone it is compared against the NS rrset the
+   child itself publishes.
  * **Embedded policy names** resolve — the domains referenced inside SPF
    (`v=spf1` TXT, e.g. `include:` / `redirect=`) and CAA (`issue` /
    `issuewild`) records, where a typo otherwise fails silently.
