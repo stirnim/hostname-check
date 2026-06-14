@@ -20,23 +20,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Find dangling and mistyped hostname references in a DNS zone.
+"""Find dangling and mistyped hostname references in a DNS zone.
 
-The script verifies that NS/CNAME/MX/SRV/DNAME/SVCB/HTTPS targets resolve,
-that the parent and child NS rrsets agree at the apex, and that the domain
-names embedded in SPF (TXT v=spf1) and CAA records resolve. It also flags a
-common typo where a fully-qualified hostname is missing its trailing dot.
-Names inside the zone itself are skipped; the focus is references that leave
-the zone, where a target that no longer resolves is a hijacking risk because
-whoever can claim it can take over the traffic or trust the zone sends there.
-
-Lookups are issued concurrently against the configured recursive resolver
-(via dnspython's async interface) and, for the apex NS check, directly
-against authoritative name servers. Apex NS checks are skipped silently
-if authoritative servers cannot be reached.
-
-Requires Python >= 3.9 and dnspython >= 2.0.
+See README.md for what is checked. Requires Python >= 3.9 and dnspython >= 2.0.
 """
 
 from __future__ import annotations

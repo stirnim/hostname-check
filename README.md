@@ -1,12 +1,17 @@
 # hostname-check
 
 Finds dangling and mistyped hostname references in a DNS zone — names the
-zone points at that fail to resolve, plus a couple of common typos. An
-external name that no longer resolves is a security risk: whoever can
-register or claim the missing target can hijack the traffic or trust the
-zone directs to it (dangling-DNS / takeover). Names that live inside the
-zone itself are skipped; the focus is references that leave the zone, where
-the target is no longer under your control.
+zone points at that fail to resolve, plus a couple of common typos. A name
+that no longer resolves is a security risk: whoever can register or claim
+the missing target can hijack the traffic or trust the zone directs to it
+(dangling-DNS / takeover), and the exposure is greatest when the target
+leaves the zone and is no longer under your control.
+
+A target that already exists as a record in the zone is left alone — it is
+present, so there is nothing dangling. Every other target is checked,
+whether it leaves the zone or points at another in-zone name: an in-zone
+reference to a name that has no record is just as dangling as an external
+one and is flagged the same way.
 
 It checks that:
 
@@ -72,7 +77,9 @@ Notes:
    [BIND ARM](https://bind9.readthedocs.io/en/latest/reference.html#tsig)).
  * The script sends DNS queries to the configured recursive resolver and,
    for apex NS checks, directly to authoritative name servers.
- * Some references are intentionally never looked up: names inside the zone,
+ * Some references are intentionally never looked up: in-zone targets that
+   already exist as a record in the zone (an in-zone target with no record
+   is still resolved and flagged, exactly like an external one),
    SVCB/HTTPS targets of `.`, SPF macros (`%{...}`) and `ip4:`/`ip6:` terms,
    and CAA `iodef` or empty `issue` values. Run with `-v` to see exactly
    which names are queried.
