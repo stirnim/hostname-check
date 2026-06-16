@@ -13,6 +13,19 @@ whether it leaves the zone or points at another in-zone name: an in-zone
 reference to a name that has no record is just as dangling as an external
 one and is flagged the same way.
 
+This is the **defensive** tool: it takes the operator's view of a zone you
+control (via AXFR or a zone file) and flags dangling references from the
+inside, before an attacker can. For the **offensive** variant — the attacker's
+view, which finds takeover candidates from a flat list of hostnames without any
+access to the zone — look at
+[subdomain-check](https://github.com/stirnim/subdomain-check).
+
+For background on why these references matter — how dangling subdomains let an
+attacker break DMARC, TLS certificate validation and other controls — see the
+talk *Breaking Security Controls Using Subdomain Hijacking* (Daniel Stirnimann,
+BSides Zürich 2017,
+[slides](https://bsideszh.ch/wp-content/uploads/2017/10/bsideszh-Daniel.pdf)).
+
 It checks that:
 
  * **Record targets** resolve — the target of every NS, CNAME, MX, SRV,
